@@ -161,12 +161,14 @@ app.post("/", (req, res) => {
   const videoActions = new Set(["text2video", "image2video"]);
   if (imageActions.has(action)) {
     req.url = "/api/image-studio";
+    app._router.handle(req, res);
   } else if (videoActions.has(action)) {
     req.url = "/api/video-studio";
+    app._router.handle(req, res);
   } else {
     req.url = "/api/brand-post";
+    app._router.handle(req, res);
   }
-  app._router.handle(req, res);
 });
 
 /* ====================== BRAND POST ====================== */
@@ -701,6 +703,14 @@ app.post("/api/video-reels", async (req, res) => {
     const cta = (body.cta || "Learn more").toString();
     const imageHint = (body.image_model_hint || "auto").toString().toLowerCase();
 
+    // NEW: slug от фронта (приоритетнее version id)
+    const videoSlug = String(
+      body.video_model_slug ||
+      body.replicate_video_slug ||
+      body.REPLICATE_MODEL_SLUG_VIDEO ||
+      ""
+    ).trim();
+
     const requestedSeconds = body.video_seconds ?? body.duration_seconds ?? 5;
     const wanSeconds = parseInt(requestedSeconds || 5, 10) <= 5 ? 5 : 10;
     const wanSize = ((r) => (r === "9:16" ? "1080*1920" : r === "16:9" ? "1920*1080" : "1080*1080"))(ratio);
@@ -785,21 +795,41 @@ Return JSON:
         } catch (e) {}
       }
     } else if (full_mode) {
-      const versionVideo = process.env.REPLICATE_MODEL_VERSION_VIDEO;
-      if (versionVideo) {
+      // 1) СНАЧАЛА пробуем SLUG, если пришёл
+      if (videoSlug) {
+        try {
+          const job = await replicateCreateBySlug(videoSlug, {
+            prompt: vprompt,
+            size: wanSize,
+            duration: wanSeconds,
+            negative_prompt: "text, logo, watermark, letters, subtitles",
+            enable_prompt_expansion: true,
+          });
+          const done = await pollPredictionByUrl(job?.urls?.get, { tries: 240, delayMs: 1500 });
+          const out = done?.output;
+          video_url = typeof out === "string" ? out : Array.isArray(out) ? out[0] : null;
+        } catch (e) {
+          // молча пойдём к version id
+        }
+      }
+
+      // 2) Если slug не дал видео — пробуем VERSION ID из .env
+      if (!video_url && process.env.REPLICATE_MODEL_VERSION_VIDEO) {
         const inputV = {
           prompt: vprompt,
           size: wanSize,
           duration: wanSeconds,
-          negative_prompt: "text, logo, watermark, letter",
+          negative_prompt: "text, logo, watermark, letters, subtitles",
           enable_prompt_expansion: true,
         };
         try {
-          const job = await replicatePredict(versionVideo, inputV);
+          const job = await replicatePredict(process.env.REPLICATE_MODEL_VERSION_VIDEO, inputV);
           const out = job?.output;
-          video_url = typeof out === "string" ? out : null;
+          video_url = typeof out === "string" ? out : Array.isArray(out) ? out[0] : null;
         } catch (e) {}
       }
+
+      // 3) Если видео не удалось — делаем картинку как fallback (как и было)
       if (!video_url && opts.image !== false) {
         const versionImg = imageModelKey === "flux" ? process.env.REPLICATE_MODEL_VERSION_FLUX : process.env.REPLICATE_MODEL_VERSION_SDXL;
         if (versionImg) {
