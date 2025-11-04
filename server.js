@@ -1,6 +1,5 @@
 // HI-AI HUB — Unified Backend (Brand Post + Image Studio + Video Studio + Video Reels)
 // Express + OpenAI + Replicate (polling, data:URL safe, model routing via ENV)
-
 import express from "express";
 import cors from "cors";
 import OpenAI from "openai";
@@ -17,30 +16,27 @@ async function fetchJson(url, opts = {}) {
   const res = await fetch(url, opts);
   if (!res.ok) {
     let t = "";
-    try {
-      t = await res.text();
-    } catch {}
+    try { t = await res.text(); } catch {}
     const err = new Error(`HTTP ${res.status} ${res.statusText} :: ${t}`);
     err.status = res.status;
     throw err;
   }
   return res.json();
 }
+
 function readBody(raw) {
   if (!raw) return {};
   if (typeof raw === "object") return raw;
   if (typeof raw === "string") {
-    try {
-      return JSON.parse(raw);
-    } catch {
-      return {};
-    }
+    try { return JSON.parse(raw); } catch { return {}; }
   }
   return {};
 }
+
 function okUrl(v) {
   return typeof v === "string" && /^https?:\/\//i.test(v);
 }
+
 function pickUrl(output) {
   if (!output) return null;
   if (okUrl(output)) return output;
@@ -54,13 +50,12 @@ function pickUrl(output) {
     for (const v of Object.values(output)) if (okUrl(v)) return v;
   return null;
 }
+
 async function urlToDataURL(url) {
   const r = await fetch(url);
   if (!r.ok) {
     let msg = "";
-    try {
-      msg = await r.text();
-    } catch {}
+    try { msg = await r.text(); } catch {}
     throw new Error(`fetch failed ${r.status}${msg ? `: ${msg}` : ""}`);
   }
   const ct = r.headers.get("content-type") || "image/jpeg";
@@ -68,6 +63,7 @@ async function urlToDataURL(url) {
   const b64 = Buffer.from(ab).toString("base64");
   return `data:${ct};base64,${b64}`;
 }
+
 function makeDataUrlSafe(dataUrl) {
   const s = String(dataUrl || "").trim();
   if (!s.startsWith("data:")) return null;
@@ -137,11 +133,10 @@ const MODELS = {
   cartoon: process.env.REPLICATE_MODEL_SLUG_CARTOON,
   futuristic: process.env.REPLICATE_MODEL_SLUG_FUTURISTIC,
   i2v_hd: process.env.REPLICATE_MODEL_SLUG_I2V_HD,
-
-  sdxl: process.env.REPLICATE_MODEL_VERSION_SDXL, // version id
-  flux: process.env.REPLICATE_MODEL_VERSION_FLUX, // version id
+  sdxl: process.env.REPLICATE_MODEL_VERSION_SDXL,
+  flux: process.env.REPLICATE_MODEL_VERSION_FLUX,
   video: process.env.REPLICATE_MODEL_VERSION_VIDEO,
-  i2v: process.env.REPLICATE_MODEL_VERSION_I2V, // optional direct
+  i2v: process.env.REPLICATE_MODEL_VERSION_I2V,
   def: process.env.REPLICATE_MODEL_VERSION,
 };
 
@@ -201,11 +196,8 @@ app.post("/api/brand-post", async (req, res) => {
 
     const lengthTargets = { short: 120, medium: 220, long: 400 };
     const maxChars = lengthTargets[length] || 220;
-    const wantsEmoji = !!options.emojis;
-    const wantsHash = !!options.auto_hashtags;
 
     const openai = new OpenAI({ apiKey: process.env.OPENAI_API_KEY });
-
     let caption = null,
       vprompt = null,
       gptUsed = false;
@@ -214,26 +206,23 @@ app.post("/api/brand-post", async (req, res) => {
       try {
         const user = `
 Write a short social media caption and a clean visual prompt for an image generator.
-
 Constraints:
 - Tone preset: ${body.preset || "neutral"}
 - CTA text: ${body.cta || "Learn more"}
 - Category: ${category}${subcategory ? " / " + subcategory : ""}
-- Emojis: ${wantsEmoji ? "ON (use 1–3 emojis total)" : "OFF (no emojis)"}
-- Hashtags: ${wantsHash ? "ON (2–4 relevant at end)" : "OFF (no hashtags)"}
+- Emojis: ${!!options.emojis ? "ON (use 1–3 emojis total)" : "OFF (no emojis)"}
+- Hashtags: ${!!options.auto_hashtags ? "ON (2–4 relevant at end)" : "OFF (no hashtags)"}
 - Do NOT include any URLs in the caption.
 - Aim for ~${maxChars} characters (hard cap: ${Math.round(maxChars * 1.1)}).
 - Visual prompt must forbid text/letters/logos in image and keep text-safe area.
 - Aspect ratio primary: ${ratio}
 - Style hint: ${style}
-
 Event idea: "${idea}"
-
 Return STRICT JSON:
 {
   "caption": "one paragraph under ${Math.round(
-    maxChars * 1.1
-  )} chars, CTA included, obey emoji/hashtag flags, no URLs",
+          maxChars * 1.1
+        )} chars, CTA included, obey emoji/hashtag flags, no URLs",
   "visual_prompt": "clean prompt for image generator without text in image"
 }`.trim();
 
@@ -243,17 +232,18 @@ Return STRICT JSON:
           temperature: 0.9,
           max_tokens: 500,
         });
+
         const text = gptResp?.choices?.[0]?.message?.content || "";
         const s = text.indexOf("{"),
           e = text.lastIndexOf("}");
         const parsed = JSON.parse(
           s >= 0 && e >= 0 ? text.slice(s, e + 1) : "{}"
         );
-
         caption = (parsed.caption || "").toString().trim();
         vprompt = (parsed.visual_prompt || "").toString().trim();
 
         if (!caption || !vprompt) throw new Error("Empty fields in GPT JSON");
+
         if (caption.length > Math.round(maxChars * 1.1)) {
           const cut = caption.slice(0, Math.round(maxChars * 1.1));
           const idx = Math.max(
@@ -263,7 +253,6 @@ Return STRICT JSON:
           );
           caption = cut.slice(0, idx).trim() + "…";
         }
-
         gptUsed = true;
       } catch (e) {
         caption = `✨ ${idea}\n🚀 Learn more and take action today.\n\n➡️ Learn more\n\nhttps://hi-ai.ai #ai #automation #creativity`.slice(
@@ -273,7 +262,6 @@ Return STRICT JSON:
         vprompt = `${idea}. Modern minimalist beige & orange, warm light, clean bg, no text. AR ${ratio}.`;
       }
     } else {
-      // image_only
       vprompt = `${idea}. ${
         style === "cartoon3d" || style === "illustrated"
           ? "3D toon-shaded / flat illustrated, rounded forms, cel shading edges."
@@ -285,14 +273,18 @@ Return STRICT JSON:
       } No text/logos on image. Aspect ratio ${ratio}. High detail.`;
     }
 
-    // Replicate image (unless text_only)
+    // ================== ИСПРАВЛЕННЫЙ БЛОК КАРТИНКИ ==================
     let image_url = null;
     if (options.image !== false && !textOnly) {
       try {
         const negative =
           "letters, text, words, watermark, logo, blurry, noisy, cluttered";
+
+        console.log(`[Replicate] Generating with ${modelKey.toUpperCase()}...`);
+
+        let job;
         if (modelKey === "flux") {
-          const job = await replicatePredict(
+          job = await replicatePredict(
             process.env.REPLICATE_MODEL_VERSION_FLUX,
             {
               prompt: vprompt,
@@ -304,9 +296,8 @@ Return STRICT JSON:
               output_quality: 90,
             }
           );
-          image_url = Array.isArray(job.output) ? job.output[0] : job.output;
         } else {
-          const job = await replicatePredict(
+          job = await replicatePredict(
             process.env.REPLICATE_MODEL_VERSION_SDXL,
             {
               prompt: vprompt,
@@ -319,12 +310,25 @@ Return STRICT JSON:
               num_outputs: 1,
             }
           );
-          image_url = Array.isArray(job.output) ? job.output[0] : job.output;
         }
+
+        const output = job?.output;
+        if (!output) {
+          console.warn("[Replicate] No output!", job);
+        } else if (Array.isArray(output) && output.length > 0) {
+          image_url = output[0];
+        } else if (typeof output === "string") {
+          image_url = output;
+        } else {
+          console.warn("[Replicate] Weird output:", output);
+        }
+
+        console.log(`[Replicate] Image ready → ${image_url || "NULL"}`);
       } catch (e) {
-        /* вернём что есть */
+        console.error("[Replicate] CRASH:", e.message || e);
       }
     }
+    // ==============================================================
 
     return res.json({
       ok: true,
@@ -337,18 +341,18 @@ Return STRICT JSON:
       mode: imageOnly ? "image_only" : textOnly ? "text_only" : "full",
     });
   } catch (e) {
+    console.error("[FATAL] /api/brand-post:", e);
     res.status(500).json({ ok: false, error: String(e.message || e) });
   }
 });
 
-/* ====================== IMAGE STUDIO (fixed to use version) ====================== */
+/* ====================== IMAGE STUDIO (полный, без изменений) ====================== */
 app.post("/api/image-studio", async (req, res) => {
   try {
     const WAIT_POLL_MS = 1200;
     const MAX_WAIT_MS = 120000;
     const DEFAULT_AR = "1:1";
     const DEFAULT_STRENGTH = 0.6;
-
     const REMOVE_BG_MODELS = [
       {
         slug: "recraft-ai/recraft-remove-background",
@@ -413,7 +417,6 @@ app.post("/api/image-studio", async (req, res) => {
         (k) => ANGLE_MAP[k] || k
       );
     };
-
     const body = readBody(req.body);
     const actionRaw =
       body.action || (body.image || body.image_data ? "img2img" : "text2img");
@@ -423,26 +426,22 @@ app.post("/api/image-studio", async (req, res) => {
     const strength = body.strength ?? DEFAULT_STRENGTH;
     const seed = body.seed ?? null;
     const seed_lock = !!body.seed_lock;
-    const camera_path = String(body.camera_path || "none").toLowerCase(); // 'none'|'orbit'
-
+    const camera_path = String(body.camera_path || "none").toLowerCase();
     let image_data = body.image_data || null;
     let mask_data = body.mask_data || null;
     const imageUrl = (body.image || "").trim() || null;
     const maskUrl = (body.mask || "").trim() || null;
-
     const batch_count = Math.max(1, Math.min(8, Number(body.batch_count || 1)));
     let anglesRaw = Array.isArray(body.angles) ? body.angles : [];
     const angles = anglesRaw.map((x) => {
       const key = String(x || "").toLowerCase().trim();
       return ANGLE_MAP[key] ? ANGLE_MAP[key] : key;
     });
-
     if (!process.env.REPLICATE_API_TOKEN) {
       return res
         .status(500)
         .json({ ok: false, success: false, error: "Missing REPLICATE_API_TOKEN" });
     }
-
     try {
       if (!image_data && okUrl(imageUrl)) image_data = await urlToDataURL(imageUrl);
       if (!mask_data && okUrl(maskUrl)) mask_data = await urlToDataURL(maskUrl);
@@ -451,7 +450,6 @@ app.post("/api/image-studio", async (req, res) => {
         .status(400)
         .json({ ok: false, success: false, error: `fetch(url) failed: ${String(e)}` });
     }
-
     async function waitPrediction(id, model, maxMs = MAX_WAIT_MS) {
       const started = Date.now();
       while (true) {
@@ -475,7 +473,6 @@ app.post("/api/image-studio", async (req, res) => {
       const j = Math.random() * 0.12 - 0.06;
       return Math.min(0.9, Math.max(0.3, b + j));
     };
-
     async function createPredictionBySlug(slug, input) {
       const versionId = await getLatestVersionId(slug);
       const pred = await fetchJson("https://api.replicate.com/v1/predictions", {
@@ -485,7 +482,6 @@ app.post("/api/image-studio", async (req, res) => {
       });
       return pred;
     }
-
     async function runSingle({ prompt, image_data, mask_data, strength, seed }) {
       let slug = "",
         input = {};
@@ -535,13 +531,10 @@ app.post("/api/image-studio", async (req, res) => {
       } else {
         throw new Error(`unknown action: ${action}`);
       }
-
       const pred = await createPredictionBySlug(slug, input);
       const url = await waitPrediction(pred.id, slug, body.max_wait_ms);
       return { image_url: url, model: slug };
     }
-
-    // Single or Batch
     if (batch_count === 1) {
       const anglePhrase =
         camera_path === "orbit" && batch_count > 1
@@ -561,13 +554,10 @@ app.post("/api/image-studio", async (req, res) => {
         return res.status(502).json({ ok: false, success: false, error: out.error });
       throw new Error("unexpected empty output");
     }
-
-    // Batch
     const count = Math.max(1, Math.min(8, batch_count));
     const baseSeed = seed != null ? Number(seed) : Math.floor(Math.random() * 10_000_000);
     const seqAngles =
       camera_path === "orbit" && batch_count > 1 ? orbitAngles(count) : angles;
-
     const tasks = [];
     for (let i = 0; i < count; i++) {
       const anglePhrase = seqAngles.length ? seqAngles[i % seqAngles.length] : "";
@@ -576,7 +566,6 @@ app.post("/api/image-studio", async (req, res) => {
       const useSeed = seed_lock ? baseSeed : baseSeed + i;
       tasks.push({ prompt: p, image_data, mask_data, strength: s, seed: useSeed });
     }
-
     const out = [];
     for (const t of tasks) {
       try {
@@ -595,11 +584,10 @@ app.post("/api/image-studio", async (req, res) => {
   }
 });
 
-/* ====================== VIDEO STUDIO ====================== */
+/* ====================== VIDEO STUDIO (полный) ====================== */
 app.post("/api/video-studio", async (req, res) => {
   try {
     const body = readBody(req.body);
-
     const mapRatioToWanSize = (ratio) => {
       const r = String(ratio || "9:16").replace("-", ":");
       if (r === "16:9") return "1920*1080";
@@ -642,7 +630,6 @@ app.post("/api/video-studio", async (req, res) => {
         `Avoid logos, watermarks, letters, subtitles.`,
       ].join(" ");
     };
-
     const mode = String(body.mode || "text2video").toLowerCase();
     const idea = String(body.idea || body.prompt || "").trim();
     const style = String(body.style || "auto").toLowerCase();
@@ -650,7 +637,6 @@ app.post("/api/video-studio", async (req, res) => {
     const secs = fitDurationToWan(body.video_seconds ?? body.duration_seconds ?? 5);
     const size = mapRatioToWanSize(ratio);
     const [w, h] = ratioToWH(ratio);
-
     const vprompt = buildVPrompt({
       idea,
       style,
@@ -659,23 +645,18 @@ app.post("/api/video-studio", async (req, res) => {
       category: body.category,
       subcategory: body.subcategory,
     });
-
     if (mode !== "image2video" && !idea) {
       return res.json({ ok: false, error: "Missing 'idea' for text2video" });
     }
     if (mode === "image2video" && !body.image_url && !body.image_data_url) {
       return res.json({ ok: false, error: "Provide 'image_url' or 'image_data_url'" });
     }
-
     let video_url = null;
     let image_url = null;
     let modeUsed = mode;
-
-    // TEXT -> VIDEO
     if (mode === "text2video") {
       const verVideo = (process.env.REPLICATE_MODEL_VERSION_VIDEO || "").trim();
       if (!verVideo) return res.json({ ok: false, error: "Set REPLICATE_MODEL_VERSION_VIDEO" });
-
       const inputV = {
         prompt: vprompt,
         size,
@@ -691,10 +672,7 @@ app.post("/api/video-studio", async (req, res) => {
             : Array.isArray(job.output)
             ? job.output[0]
             : null;
-      } catch (e) {
-        /* fallback ниже */
-      }
-
+      } catch (e) {}
       if (!video_url && (process.env.REPLICATE_MODEL_VERSION_SDXL || process.env.REPLICATE_MODEL_VERSION_FLUX)) {
         const useFlux = style === "cartoon3d" || style === "illustrated";
         const verStill = useFlux
@@ -726,19 +704,15 @@ app.post("/api/video-studio", async (req, res) => {
         }
       }
     }
-
-    // IMAGE -> VIDEO
     if (mode === "image2video") {
       let versionI2V = (process.env.REPLICATE_MODEL_VERSION_I2V || "").trim();
       const fallbackSlug = (process.env.REPLICATE_MODEL_SLUG_I2V_HD || "").trim();
-
       if (!versionI2V && !fallbackSlug) {
         return res.json({
           ok: false,
           error: "No i2v model (set REPLICATE_MODEL_VERSION_I2V or SLUG_I2V_HD)",
         });
       }
-
       let startImage = (body.image_url || "").trim();
       const dataUrlRaw = (body.image_data_url || "").trim();
       if (dataUrlRaw) {
@@ -747,7 +721,6 @@ app.post("/api/video-studio", async (req, res) => {
       } else if (!/^https?:\/\//i.test(startImage)) {
         return res.json({ ok: false, error: "image_url must be https" });
       }
-
       const motion = Math.max(0, Math.min(1, parseFloat(body.motion_strength) || 0.35));
       const cam =
         {
@@ -757,7 +730,6 @@ app.post("/api/video-studio", async (req, res) => {
           "tilt-up": "tilt-up",
           "tilt-down": "tilt-down",
         }[String(body.camera || "auto").toLowerCase()] || "auto";
-
       const inputI2V = {
         prompt: vprompt,
         start_image: startImage,
@@ -767,7 +739,6 @@ app.post("/api/video-studio", async (req, res) => {
         duration: secs,
         negative_prompt: "text, logo, watermark, letters, subtitles",
       };
-
       try {
         if (versionI2V) {
           const job = await replicatePredict(versionI2V, inputI2V, {
@@ -781,7 +752,6 @@ app.post("/api/video-studio", async (req, res) => {
               ? job.output[0]
               : null;
         } else {
-          // прямой вызов через slug (если version нет)
           const versionId = await getLatestVersionId(fallbackSlug);
           const job = await fetchJson("https://api.replicate.com/v1/predictions", {
             method: "POST",
@@ -803,7 +773,6 @@ app.post("/api/video-studio", async (req, res) => {
         return res.json({ ok: false, error: `Replicate i2v error: ${e.message}` });
       }
     }
-
     return res.json({
       ok: true,
       vprompt,
@@ -819,18 +788,15 @@ app.post("/api/video-studio", async (req, res) => {
   }
 });
 
-/* ====================== VIDEO REELS ====================== */
+/* ====================== VIDEO REELS (полный) ====================== */
 app.post("/api/video-reels", async (req, res) => {
   try {
     const body = readBody(req.body);
-
     const idea = (body.idea || body.prompt || "").toString().trim();
     if (!idea) return res.status(400).json({ ok: false, error: "Missing 'idea'" });
-
     const text_only = !!body.text_only || !!body.force_text_only;
     const image_only = !!body.image_only;
     const full_mode = !text_only && !image_only;
-
     const style = (body.style || "auto").toString().toLowerCase();
     const ratio = (body.ratio || "9:16").toString().replace("-", ":");
     const length = (body.length || "medium").toString().toLowerCase();
@@ -840,22 +806,17 @@ app.post("/api/video-reels", async (req, res) => {
     const preset = (body.preset || "neutral").toString();
     const cta = (body.cta || "Learn more").toString();
     const imageHint = (body.image_model_hint || "auto").toString().toLowerCase();
-
     const requestedSeconds = body.video_seconds ?? body.duration_seconds ?? 5;
     const wanSeconds = parseInt(requestedSeconds || 5, 10) <= 5 ? 5 : 10;
     const wanSize = ((r) =>
       r === "9:16" ? "1080*1920" : r === "16:9" ? "1920*1080" : "1080*1080")(ratio);
-
     const [w, h] =
       ratio === "9:16" ? [1080, 1920] : ratio === "16:9" ? [1920, 1080] : [1080, 1080];
     const imageModelKey = chooseImageModelKey({ idea, style, hint: imageHint });
-
     const lengthTargets = { short: 120, medium: 220, long: 400 };
     const maxChars = lengthTargets[length] || 220;
     const wantsEmoji = !!opts.emojis;
     const wantsHash = !!opts.auto_hashtags;
-
-    // GPT
     let caption = null,
       vprompt = null,
       gptUsed = false;
@@ -864,7 +825,6 @@ app.post("/api/video-reels", async (req, res) => {
       try {
         const user = `
 Write a short social caption AND a clean visual prompt.
-
 Constraints:
 - Tone: ${preset}
 - CTA: ${cta}
@@ -876,15 +836,12 @@ Constraints:
 - Visual prompt: no on-frame text, text-safe area.
 - Aspect ratio: ${ratio}
 - Style: ${style}
-
 Idea: "${idea}"
-
 Return JSON:
 {
   "caption": "...",
   "visual_prompt": "..."
 }`.trim();
-
         const resp = await openai.chat.completions.create({
           model: "gpt-4o-mini",
           messages: [{ role: "user", content: user }],
@@ -921,13 +878,9 @@ Return JSON:
         vprompt = `${idea}. Clean. AR ${ratio}.`;
       }
     }
-
-    // VISUAL
     let video_url = null,
       image_url = null;
-
     if (text_only) {
-      // nothing
     } else if (image_only && opts.image !== false) {
       const versionImg =
         imageModelKey === "flux"
@@ -1008,7 +961,6 @@ Return JSON:
         }
       }
     }
-
     return res.json({
       ok: true,
       caption,
