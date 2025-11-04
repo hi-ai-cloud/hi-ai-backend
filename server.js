@@ -1,6 +1,6 @@
 // server.js
 // HI-AI HUB — Unified Backend (Brand Post + Image Studio + Video Studio + Video Reels)
-// Express + OpenAI + Replicate (polling, data:URL safe, model routing via ENV)
+// Express + OpenAI + Replicate (polling, data:URL safe, model routing fixed for Replicate 2025)
 
 import express from "express";
 import cors from "cors";
@@ -19,9 +19,7 @@ async function fetchJson(url, opts = {}) {
   const res = await fetch(url, opts);
   if (!res.ok) {
     let t = "";
-    try {
-      t = await res.text();
-    } catch {}
+    try { t = await res.text(); } catch {}
     const err = new Error(`HTTP ${res.status} ${res.statusText} :: ${t}`);
     err.status = res.status;
     throw err;
@@ -32,11 +30,7 @@ function readBody(raw) {
   if (!raw) return {};
   if (typeof raw === "object") return raw;
   if (typeof raw === "string") {
-    try {
-      return JSON.parse(raw);
-    } catch {
-      return {};
-    }
+    try { return JSON.parse(raw); } catch { return {}; }
   }
   return {};
 }
@@ -58,9 +52,7 @@ async function urlToDataURL(url) {
   const r = await fetch(url);
   if (!r.ok) {
     let msg = "";
-    try {
-      msg = await r.text();
-    } catch {}
+    try { msg = await r.text(); } catch {}
     throw new Error(`fetch failed ${r.status}${msg ? `: ${msg}` : ""}`);
   }
   const ct = r.headers.get("content-type") || "image/jpeg";
@@ -84,12 +76,25 @@ const REPLICATE_HEADERS = () => ({
 });
 
 async function replicateCreate(version, input) {
+  // v1/predictions — ТОЛЬКО c "version"
   if (!process.env.REPLICATE_API_TOKEN) throw new Error("Missing REPLICATE_API_TOKEN");
   if (!version) throw new Error("Missing Replicate model version");
   return fetchJson("https://api.replicate.com/v1/predictions", {
     method: "POST",
     headers: REPLICATE_HEADERS(),
     body: JSON.stringify({ version, input }),
+  });
+}
+
+// Новый помощник: slug-эндпоинт (без 422)
+async function replicateCreateBySlug(slug, input) {
+  // v1/models/{owner}/{name}/predictions — ТОЛЬКО с "input"
+  if (!process.env.REPLICATE_API_TOKEN) throw new Error("Missing REPLICATE_API_TOKEN");
+  if (!slug) throw new Error("Missing Replicate model slug");
+  return fetchJson(`https://api.replicate.com/v1/models/${slug}/predictions`, {
+    method: "POST",
+    headers: REPLICATE_HEADERS(),
+    body: JSON.stringify({ input }),
   });
 }
 
@@ -136,11 +141,10 @@ function chooseImageModelKey({ idea, style, hint }) {
 
 /* ====================== HEALTH & ENV CHECK ====================== */
 app.get("/health", (_, res) => res.json({ ok: true, ts: Date.now() }));
-
-// Временная проверка окружения (можно удалить после настройки)
 app.get("/env-check", (_, res) => {
   res.json({
     REPLICATE_API_TOKEN: !!process.env.REPLICATE_API_TOKEN,
+    OPENAI_API_KEY: !!process.env.OPENAI_API_KEY,
     REPLICATE_MODEL_VERSION_SDXL: !!process.env.REPLICATE_MODEL_VERSION_SDXL,
     REPLICATE_MODEL_VERSION_FLUX: !!process.env.REPLICATE_MODEL_VERSION_FLUX,
     REPLICATE_MODEL_VERSION_VIDEO: !!process.env.REPLICATE_MODEL_VERSION_VIDEO,
@@ -148,14 +152,24 @@ app.get("/env-check", (_, res) => {
   });
 });
 
-/* ====================== BRAND POST ====================== */
-// alias: если фронт шлёт на "/", прозрачно перекидываем на /api/brand-post
+/* ====================== SMART ROOT DISPATCH ====================== */
+// Фронт шлёт POST "/" — сервер сам отправит в нужный модуль по body.action
 app.post("/", (req, res) => {
-  req.url = "/api/brand-post";
+  const body = readBody(req.body);
+  const action = String(body?.action || "").toLowerCase();
+  const imageActions = new Set(["text2img", "img2img", "inpaint", "remove_bg", "upscale", "add_object"]);
+  const videoActions = new Set(["text2video", "image2video"]);
+  if (imageActions.has(action)) {
+    req.url = "/api/image-studio";
+  } else if (videoActions.has(action)) {
+    req.url = "/api/video-studio";
+  } else {
+    req.url = "/api/brand-post";
+  }
   app._router.handle(req, res);
 });
 
-// POST /api/brand-post
+/* ====================== BRAND POST ====================== */
 app.post("/api/brand-post", async (req, res) => {
   try {
     const body = readBody(req.body);
@@ -189,9 +203,7 @@ app.post("/api/brand-post", async (req, res) => {
 
     // GPT
     const openai = new OpenAI({ apiKey: process.env.OPENAI_API_KEY });
-    let caption = null,
-      vprompt = null,
-      gptUsed = false;
+    let caption = null, vprompt = null, gptUsed = false;
 
     if (!imageOnly) {
       try {
@@ -226,8 +238,7 @@ Return STRICT JSON:
         });
 
         const text = gptResp?.choices?.[0]?.message?.content || "";
-        const s = text.indexOf("{"),
-          e = text.lastIndexOf("}");
+        const s = text.indexOf("{"), e = text.lastIndexOf("}");
         const parsed = JSON.parse(s >= 0 && e >= 0 ? text.slice(s, e + 1) : "{}");
 
         caption = (parsed.caption || "").toString().trim();
@@ -239,14 +250,12 @@ Return STRICT JSON:
           const idx = Math.max(cut.lastIndexOf(". "), cut.lastIndexOf(" "), Math.floor(cut.length * 0.9));
           caption = cut.slice(0, idx).trim() + "…";
         }
-
         gptUsed = true;
       } catch (e) {
         caption = `✨ ${idea}\n🚀 Learn more and take action today.\n\n➡️ Learn more\n\nhttps://hi-ai.ai #ai #automation #creativity`.slice(0, maxChars);
         vprompt = `${idea}. Modern minimalist beige & orange, warm light, clean bg, no text. AR ${ratio}.`;
       }
     } else {
-      // image_only
       vprompt = `${idea}. ${
         style === "cartoon3d" || style === "illustrated"
           ? "3D toon-shaded / flat illustrated, rounded forms, cel shading edges."
@@ -258,10 +267,8 @@ Return STRICT JSON:
       } No text/logos on image. Aspect ratio ${ratio}. High detail.`;
     }
 
-    // ===== VISUAL (version → slug fallback) =====
-    let image_url = null,
-      modelTried = [],
-      modelError = null;
+    // VISUAL (version → slug fallback)
+    let image_url = null, modelTried = [], modelError = null;
 
     if (options.image !== false && !textOnly) {
       try {
@@ -296,37 +303,27 @@ Return STRICT JSON:
         }
         async function tryFluxBySlug() {
           modelTried.push("FLUX(slug)");
-          const job = await fetchJson("https://api.replicate.com/v1/predictions", {
-            method: "POST",
-            headers: REPLICATE_HEADERS(),
-            body: JSON.stringify({
-              model: "black-forest-labs/flux-schnell",
-              input: {
-                prompt: vprompt,
-                aspect_ratio: ratio.replace("-", ":"),
-                num_outputs: 1,
-                output_format: "png",
-                output_quality: 90,
-              },
-            }),
+          const job = await replicateCreateBySlug("black-forest-labs/flux-schnell", {
+            prompt: vprompt,
+            aspect_ratio: ratio.replace("-", ":"),
+            num_outputs: 1,
+            output_format: "png",
+            output_quality: 90,
           });
           const done = await pollPredictionByUrl(job?.urls?.get);
           return Array.isArray(done.output) ? done.output[0] : done.output;
         }
 
         try {
-          if (modelKey === "flux") image_url = await tryFluxByVersion();
-          else image_url = await trySDXLByVersion();
+          if (modelKey === "flux" && process.env.REPLICATE_MODEL_VERSION_FLUX) image_url = await tryFluxByVersion();
+          else if (process.env.REPLICATE_MODEL_VERSION_SDXL) image_url = await trySDXLByVersion();
         } catch (e) {
           modelError = String(e);
         }
 
         if (!image_url) {
-          try {
-            image_url = await tryFluxBySlug();
-          } catch (e) {
-            if (!modelError) modelError = String(e);
-          }
+          try { image_url = await tryFluxBySlug(); }
+          catch (e) { if (!modelError) modelError = String(e); }
         }
       } catch (e) {
         modelError = String(e);
@@ -351,7 +348,6 @@ Return STRICT JSON:
 });
 
 /* ====================== IMAGE STUDIO ====================== */
-// POST /api/image-studio
 app.post("/api/image-studio", async (req, res) => {
   try {
     const WAIT_POLL_MS = 1200;
@@ -442,21 +438,27 @@ app.post("/api/image-studio", async (req, res) => {
     };
 
     async function runSingle({ prompt, image_data, mask_data, strength, seed }) {
-      let model = "",
-        input = {};
+      let model = "", input = {};
+
       if (action === "text2img") {
         if (!prompt) throw new Error("prompt is required for text2img");
-        model = "black-forest-labs/flux-schnell";
+        model = "black-forest-labs/flux-schnell"; // slug
         input = { prompt, aspect_ratio: aspect, ...(seed != null ? { seed } : {}) };
+        const pred = await replicateCreateBySlug(model, input);
+        const url = await waitPrediction(pred.id, model, body.max_wait_ms);
+        return { image_url: url, model };
       } else if (action === "img2img") {
         if (!image_data) throw new Error("image is required for img2img");
-        model = "black-forest-labs/flux-kontext-pro";
-        input = { prompt, input_image: image_data, image: image_data, strength, output_format: "jpg", ...(seed != null ? { seed } : {}) };
+        model = "black-forest-labs/flux-kontext-pro"; // slug
+        input = { prompt: promptRaw, input_image: image_data, image: image_data, strength, output_format: "jpg", ...(seed != null ? { seed } : {}) };
+        const pred = await replicateCreateBySlug(model, input);
+        const url = await waitPrediction(pred.id, model, body.max_wait_ms);
+        return { image_url: url, model };
       } else if (action === "inpaint") {
         if (!image_data) throw new Error("image is required for inpaint");
-        model = "black-forest-labs/flux-kontext-pro";
+        model = "black-forest-labs/flux-kontext-pro"; // slug
         input = {
-          prompt,
+          prompt: promptRaw,
           input_image: image_data,
           image: image_data,
           ...(mask_data ? { mask_image: mask_data, mask: mask_data } : {}),
@@ -464,18 +466,17 @@ app.post("/api/image-studio", async (req, res) => {
           output_format: "jpg",
           ...(seed != null ? { seed } : {}),
         };
+        const pred = await replicateCreateBySlug(model, input);
+        const url = await waitPrediction(pred.id, model, body.max_wait_ms);
+        return { image_url: url, model };
       } else if (action === "remove_bg" || action === "upscale") {
         const MODELS = action === "remove_bg" ? REMOVE_BG_MODELS : UPSCALE_MODELS;
         if (!image_data) throw new Error(`image is required for ${action}`);
         const tried = [];
         for (const m of MODELS) {
           try {
-            const inputX = m.makeInput({ image_data, prompt: prompt || "" });
-            const pred = await fetchJson("https://api.replicate.com/v1/predictions", {
-              method: "POST",
-              headers: REPLICATE_HEADERS(),
-              body: JSON.stringify({ model: m.slug, input: inputX }),
-            });
+            const inputX = m.makeInput({ image_data, prompt: promptRaw || "" });
+            const pred = await replicateCreateBySlug(m.slug, inputX); // slug endpoint
             const image_url = await waitPrediction(pred.id, m.slug, body.max_wait_ms);
             return { image_url, model: m.slug, tried };
           } catch (e) {
@@ -484,17 +485,12 @@ app.post("/api/image-studio", async (req, res) => {
         }
         if (action === "upscale") return { error: `${action}: no available models`, status: 502 };
         throw new Error(`${action}: all models failed`);
+      } else if (action === "add_object") {
+        // handled on front (canvas), ничего не делаем
+        return { image_url: null, model: "local-canvas" };
       } else {
         throw new Error(`unknown action: ${action}`);
       }
-
-      const pred = await fetchJson("https://api.replicate.com/v1/predictions", {
-        method: "POST",
-        headers: REPLICATE_HEADERS(),
-        body: JSON.stringify({ model, input }),
-      });
-      const url = await waitPrediction(pred.id, model, body.max_wait_ms);
-      return { image_url: url, model };
     }
 
     if (batch_count === 1) {
@@ -521,24 +517,19 @@ app.post("/api/image-studio", async (req, res) => {
 
     const out = [];
     for (const t of tasks) {
-      try {
-        const r = await runSingle(t);
-        out.push({ ok: true, image_url: r.image_url });
-      } catch (e) {
-        out.push({ ok: false, error: String(e) });
-      }
+      try { out.push({ ok: true, ...(await runSingle(t)) }); }
+      catch (e) { out.push({ ok: false, error: String(e) }); }
     }
     const firstOk = out.find((x) => x.ok && x.image_url);
     const result = { ok: true, success: true, mode: action, batch: out };
     if (firstOk) result.image_url = firstOk.image_url;
     return res.json(result);
   } catch (e) {
-    res.status(502).json({ ok: false, success: false, error: String(e) });
+    res.status(502).json({ ok: false, success: false, error: String(e.message || e) });
   }
 });
 
 /* ====================== VIDEO STUDIO ====================== */
-// POST /api/video-studio
 app.post("/api/video-studio", async (req, res) => {
   try {
     const body = readBody(req.body);
@@ -610,9 +601,7 @@ app.post("/api/video-studio", async (req, res) => {
       try {
         const job = await replicatePredict(verVideo, inputV);
         video_url = typeof job.output === "string" ? job.output : Array.isArray(job.output) ? job.output[0] : null;
-      } catch (e) {
-        /* fallback ниже */
-      }
+      } catch (e) { /* fallback ниже */ }
 
       if (!video_url && (process.env.REPLICATE_MODEL_VERSION_SDXL || process.env.REPLICATE_MODEL_VERSION_FLUX)) {
         const useFlux = style === "cartoon3d" || style === "illustrated";
@@ -666,11 +655,7 @@ app.post("/api/video-studio", async (req, res) => {
           const job = await replicatePredict(versionI2V, inputI2V, { tries: 240, delayMs: 1500 });
           video_url = typeof job.output === "string" ? job.output : Array.isArray(job.output) ? job.output[0] : null;
         } else {
-          const job = await fetchJson("https://api.replicate.com/v1/predictions", {
-            method: "POST",
-            headers: REPLICATE_HEADERS(),
-            body: JSON.stringify({ model: fallbackSlug, input: inputI2V }),
-          });
+          const job = await replicateCreateBySlug(fallbackSlug, inputI2V); // slug fallback
           const done = await pollPredictionByUrl(job?.urls?.get, { tries: 240, delayMs: 1500 });
           video_url = typeof done.output === "string" ? done.output : Array.isArray(done.output) ? done.output[0] : null;
         }
@@ -695,7 +680,6 @@ app.post("/api/video-studio", async (req, res) => {
 });
 
 /* ====================== VIDEO REELS (caption + video) ====================== */
-// POST /api/video-reels
 app.post("/api/video-reels", async (req, res) => {
   try {
     const body = readBody(req.body);
@@ -730,9 +714,7 @@ app.post("/api/video-reels", async (req, res) => {
     const wantsHash = !!opts.auto_hashtags;
 
     // GPT
-    let caption = null,
-      vprompt = null,
-      gptUsed = false;
+    let caption = null, vprompt = null, gptUsed = false;
     if (!image_only) {
       const openai = new OpenAI({ apiKey: process.env.OPENAI_API_KEY });
       try {
@@ -766,13 +748,11 @@ Return JSON:
           max_tokens: 500,
         });
         const text = resp?.choices?.[0]?.message?.content || "";
-        const s = text.indexOf("{"),
-          e = text.lastIndexOf("}");
+        const s = text.indexOf("{"), e = text.lastIndexOf("}");
         const j = JSON.parse(s >= 0 && e >= 0 ? text.slice(s, e + 1) : "{}");
         caption = (j.caption || "").toString().trim();
         vprompt = (j.visual_prompt || "").toString().trim();
-        if (!caption)
-          caption = `✨ ${idea}\n🚀 Learn more and take action today.\n\n➡️ Learn more\n\nhttps://hi-ai.ai #ai #automation #creativity`.slice(0, maxChars);
+        if (!caption) caption = `✨ ${idea}\n🚀 Learn more and take action today.\n\n➡️ Learn more\n\nhttps://hi-ai.ai #ai #automation #creativity`.slice(0, maxChars);
         if (!vprompt) vprompt = `${idea}. Clean. AR ${ratio}.`;
         if (caption.length > Math.round(maxChars * 1.1)) {
           const cut = caption.slice(0, Math.round(maxChars * 1.1));
@@ -787,11 +767,10 @@ Return JSON:
     }
 
     // VISUAL
-    let video_url = null,
-      image_url = null;
+    let video_url = null, image_url = null;
 
     if (text_only) {
-      // nothing
+      // ничего не делаем
     } else if (image_only && opts.image !== false) {
       const versionImg = imageModelKey === "flux" ? process.env.REPLICATE_MODEL_VERSION_FLUX : process.env.REPLICATE_MODEL_VERSION_SDXL;
       if (versionImg) {
