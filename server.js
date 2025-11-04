@@ -76,7 +76,6 @@ const REPLICATE_HEADERS = () => ({
 });
 
 async function replicateCreate(version, input) {
-  // v1/predictions — ТОЛЬКО c "version"
   if (!process.env.REPLICATE_API_TOKEN) throw new Error("Missing REPLICATE_API_TOKEN");
   if (!version) throw new Error("Missing Replicate model version");
   return fetchJson("https://api.replicate.com/v1/predictions", {
@@ -86,9 +85,7 @@ async function replicateCreate(version, input) {
   });
 }
 
-// Новый помощник: slug-эндпоинт (без 422)
 async function replicateCreateBySlug(slug, input) {
-  // v1/models/{owner}/{name}/predictions — ТОЛЬКО с "input"
   if (!process.env.REPLICATE_API_TOKEN) throw new Error("Missing REPLICATE_API_TOKEN");
   if (!slug) throw new Error("Missing Replicate model slug");
   return fetchJson(`https://api.replicate.com/v1/models/${slug}/predictions`, {
@@ -153,7 +150,6 @@ app.get("/env-check", (_, res) => {
 });
 
 /* ====================== SMART ROOT DISPATCH ====================== */
-// Фронт шлёт POST "/" — сервер сам отправит в нужный модуль по body.action
 app.post("/", (req, res) => {
   const body = readBody(req.body);
   const action = String(body?.action || "").toLowerCase();
@@ -488,7 +484,6 @@ app.post("/api/image-studio", async (req, res) => {
         if (action === "upscale") return { error: `${action}: no available models`, status: 502 };
         throw new Error(`${action}: all models failed`);
       } else if (action === "add_object") {
-        // handled on front (canvas), ничего не делаем
         return { image_url: null, model: "local-canvas" };
       } else {
         throw new Error(`unknown action: ${action}`);
@@ -588,7 +583,29 @@ app.post("/api/video-studio", async (req, res) => {
     });
 
     if (mode !== "image2video" && !idea) return res.json({ ok: false, error: "Missing 'idea' for text2video" });
-    if (mode === "image2video" && !body.image_url && !body.image_data_url) return res.json({ ok: false, error: "Provide 'image_url' or 'image_data_url'" });
+
+    // ---------- I2V: принять ВСЕ варианты источника ----------
+    let incomingImage =
+      (body.image_data_url && String(body.image_data_url).trim()) ||
+      (body.image && String(body.image).trim()) ||
+      (body.image_url && String(body.image_url).trim()) ||
+      "";
+
+    if (mode === "image2video" && !incomingImage) {
+      return res.json({ ok: false, error: "Provide 'image_url' or 'image_data_url' (or 'image')" });
+    }
+    // Нормализуем: если это https — ок; если data: — убеждаемся, что base64-безопасно.
+    if (incomingImage && incomingImage.startsWith("data:")) {
+      const fixed = makeDataUrlSafe(incomingImage);
+      if (!fixed) return res.json({ ok: false, error: "Bad data URL" });
+      incomingImage = fixed;
+    } else if (incomingImage && !/^https?:\/\//i.test(incomingImage)) {
+      return res.json({ ok: false, error: "image_url must be https or data:URL" });
+    }
+    // --------------------------------------------------------
+
+    const videoSlug =
+      String(body.video_model_slug || body.replicate_video_slug || body.REPLICATE_MODEL_SLUG_VIDEO || "").trim();
 
     let video_url = null;
     let image_url = null;
@@ -621,45 +638,64 @@ app.post("/api/video-studio", async (req, res) => {
       }
     }
 
-    // IMAGE -> VIDEO (start_image data:URL safe)
+    // IMAGE -> VIDEO (поддержка start_image | image | input_image)
     if (mode === "image2video") {
       let versionI2V = (process.env.REPLICATE_MODEL_VERSION_I2V || "").trim();
       const fallbackSlug = (process.env.REPLICATE_MODEL_SLUG_I2V_HD || "").trim();
 
       if (!versionI2V && !fallbackSlug) return res.json({ ok: false, error: "No i2v model (set REPLICATE_MODEL_VERSION_I2V or SLUG_I2V_HD)" });
 
-      let startImage = (body.image_url || "").trim();
-      const dataUrlRaw = (body.image_data_url || "").trim();
-      if (dataUrlRaw) {
-        startImage = makeDataUrlSafe(dataUrlRaw);
-        if (!startImage) return res.json({ ok: false, error: "Bad data URL" });
-      } else if (!/^https?:\/\//i.test(startImage)) {
-        return res.json({ ok: false, error: "image_url must be https" });
-      }
+      const baseInput = {
+        prompt: vprompt,
+        size,
+        duration: secs,
+        negative_prompt: "text, logo, watermark, letters, subtitles",
+        enable_prompt_expansion: true,
+      };
 
       const motion = Math.max(0, Math.min(1, parseFloat(body.motion_strength) || 0.35));
       const cam = { "push-in": "push-in", "pan-left": "pan-left", "pan-right": "pan-right", "tilt-up": "tilt-up", "tilt-down": "tilt-down" }[
         String(body.camera || "auto").toLowerCase()
       ] || "auto";
 
-      const inputI2V = {
-        prompt: vprompt,
-        start_image: startImage,
-        camera_motion_strength: motion,
-        camera_motion: cam,
-        size,
-        duration: secs,
-        negative_prompt: "text, logo, watermark, letters, subtitles",
-      };
+      // Набор вариантов параметров картинки для разных моделей
+      const imageVariants = [
+        { key: "start_image", value: incomingImage },
+        { key: "image", value: incomingImage },
+        { key: "input_image", value: incomingImage },
+      ];
+
+      const extra = { camera_motion_strength: motion, camera_motion: cam };
 
       try {
         if (versionI2V) {
-          const job = await replicatePredict(versionI2V, inputI2V, { tries: 240, delayMs: 1500 });
-          video_url = typeof job.output === "string" ? job.output : Array.isArray(job.output) ? job.output[0] : null;
+          // Версионный эндпоинт (v1/predictions с version id) принимает объект в "input"
+          let got = null;
+          let lastErr = null;
+          for (const v of imageVariants) {
+            try {
+              const job = await replicatePredict(versionI2V, { ...baseInput, ...extra, [v.key]: v.value }, { tries: 240, delayMs: 1500 });
+              got = typeof job.output === "string" ? job.output : Array.isArray(job.output) ? job.output[0] : null;
+              if (got) break;
+            } catch (e) { lastErr = e; }
+          }
+          if (!got && lastErr) throw lastErr;
+          video_url = got;
         } else {
-          const job = await replicateCreateBySlug(fallbackSlug, inputI2V); // slug fallback
-          const done = await pollPredictionByUrl(job?.urls?.get, { tries: 240, delayMs: 1500 });
-          video_url = typeof done.output === "string" ? done.output : Array.isArray(done.output) ? done.output[0] : null;
+          // slug эндпоинт (v1/models/{slug}/predictions) — перебирам варианты
+          let got = null;
+          let lastErr = null;
+          for (const v of imageVariants) {
+            try {
+              const job = await replicateCreateBySlug(fallbackSlug, { ...baseInput, ...extra, [v.key]: v.value });
+              const done = await pollPredictionByUrl(job?.urls?.get, { tries: 240, delayMs: 1500 });
+              const out = done?.output;
+              got = typeof out === "string" ? out : Array.isArray(out) ? out[0] : null;
+              if (got) break;
+            } catch (e) { lastErr = e; }
+          }
+          if (!got && lastErr) throw lastErr;
+          video_url = got;
         }
       } catch (e) {
         return res.json({ ok: false, error: `Replicate i2v error: ${e.message}` });
@@ -703,7 +739,6 @@ app.post("/api/video-reels", async (req, res) => {
     const cta = (body.cta || "Learn more").toString();
     const imageHint = (body.image_model_hint || "auto").toString().toLowerCase();
 
-    // NEW: slug от фронта (приоритетнее version id)
     const videoSlug = String(
       body.video_model_slug ||
       body.replicate_video_slug ||
@@ -780,7 +815,7 @@ Return JSON:
     let video_url = null, image_url = null;
 
     if (text_only) {
-      // ничего не делаем
+      // nothing
     } else if (image_only && opts.image !== false) {
       const versionImg = imageModelKey === "flux" ? process.env.REPLICATE_MODEL_VERSION_FLUX : process.env.REPLICATE_MODEL_VERSION_SDXL;
       if (versionImg) {
@@ -795,7 +830,6 @@ Return JSON:
         } catch (e) {}
       }
     } else if (full_mode) {
-      // 1) СНАЧАЛА пробуем SLUG, если пришёл
       if (videoSlug) {
         try {
           const job = await replicateCreateBySlug(videoSlug, {
@@ -809,11 +843,10 @@ Return JSON:
           const out = done?.output;
           video_url = typeof out === "string" ? out : Array.isArray(out) ? out[0] : null;
         } catch (e) {
-          // молча пойдём к version id
+          // fallthrough
         }
       }
 
-      // 2) Если slug не дал видео — пробуем VERSION ID из .env
       if (!video_url && process.env.REPLICATE_MODEL_VERSION_VIDEO) {
         const inputV = {
           prompt: vprompt,
@@ -829,7 +862,6 @@ Return JSON:
         } catch (e) {}
       }
 
-      // 3) Если видео не удалось — делаем картинку как fallback (как и было)
       if (!video_url && opts.image !== false) {
         const versionImg = imageModelKey === "flux" ? process.env.REPLICATE_MODEL_VERSION_FLUX : process.env.REPLICATE_MODEL_VERSION_SDXL;
         if (versionImg) {
