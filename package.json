@@ -2,18 +2,14 @@
   "name": "hi-ai-backend",
   "version": "1.0.0",
   "type": "module",
-  "main": "server.js",
+  "engines": { "node": ">=20.0.0" },
   "scripts": {
-    "start": "node server.js",
-    "dev": "node server.js"
+    "start": "node server.js"
   },
   "dependencies": {
-    "express": "4.19.2",
-    "node-fetch": "3.3.2",
-    "cors": "2.8.5",
-    "dotenv": "16.4.5"
-  },
-  "engines": {
-    "node": "20.x"
+    "express": "^4.21.1",
+    "cors": "^2.8.5",
+    "openai": "^4.58.1",
+    "dotenv": "^16.4.5"
   }
 }
