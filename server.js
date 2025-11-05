@@ -149,6 +149,16 @@ app.get("/env-check", (_, res) => {
   });
 });
 
+/* ====================== PRELIGHT (CORS OPTIONS) ====================== */
+app.options("*", (req, res) => {
+  res.set({
+    "Access-Control-Allow-Origin": "*",
+    "Access-Control-Allow-Methods": "GET,POST,OPTIONS",
+    "Access-Control-Allow-Headers": "Content-Type, Authorization",
+  });
+  res.sendStatus(200);
+});
+
 /* ====================== SMART ROOT DISPATCH ====================== */
 app.post("/", (req, res) => {
   const body = readBody(req.body);
@@ -239,16 +249,16 @@ Return STRICT JSON:
         const s = text.indexOf("{"), e = text.lastIndexOf("}");
         const parsed = JSON.parse(s >= 0 && e >= 0 ? text.slice(s, e + 1) : "{}");
 
-        caption = (parsed.caption || "").toString().trim();
-        vprompt = (parsed.visual_prompt || "").toString().trim();
+        let cap = (parsed.caption || "").toString().trim();
+        let vis = (parsed.visual_prompt || "").toString().trim();
 
-        if (!caption || !vprompt) throw new Error("Empty fields in GPT JSON");
-        if (caption.length > Math.round(maxChars * 1.1)) {
-          const cut = caption.slice(0, Math.round(maxChars * 1.1));
+        if (!cap || !vis) throw new Error("Empty fields in GPT JSON");
+        if (cap.length > Math.round(maxChars * 1.1)) {
+          const cut = cap.slice(0, Math.round(maxChars * 1.1));
           const idx = Math.max(cut.lastIndexOf(". "), cut.lastIndexOf(" "), Math.floor(cut.length * 0.9));
-          caption = cut.slice(0, idx).trim() + "…";
+          cap = cut.slice(0, idx).trim() + "…";
         }
-        gptUsed = true;
+        caption = cap; vprompt = vis; gptUsed = true;
       } catch (e) {
         caption = `✨ ${idea}\n🚀 Learn more and take action today.\n\n➡️ Learn more\n\nhttps://hi-ai.ai #ai #automation #creativity`.slice(0, maxChars);
         vprompt = `${idea}. Modern minimalist beige & orange, warm light, clean bg, no text. AR ${ratio}.`;
@@ -290,8 +300,8 @@ Return STRICT JSON:
           const job = await replicatePredict(process.env.REPLICATE_MODEL_VERSION_SDXL, {
             prompt: vprompt,
             negative_prompt: negative,
-            width: w,
-            height: h,
+            width: 1024,
+            height: 1024,
             num_inference_steps: 30,
             guidance_scale: 7.0,
             scheduler: "DPMSolverMultistep",
@@ -313,7 +323,7 @@ Return STRICT JSON:
         }
 
         try {
-          if (modelKey === "flux" && process.env.REPLICATE_MODEL_VERSION_FLUX) image_url = await tryFluxByVersion();
+          if (process.env.REPLICATE_MODEL_VERSION_FLUX) image_url = await tryFluxByVersion();
           else if (process.env.REPLICATE_MODEL_VERSION_SDXL) image_url = await trySDXLByVersion();
         } catch (e) {
           modelError = String(e);
@@ -333,7 +343,7 @@ Return STRICT JSON:
       caption: textOnly || !caption ? caption || null : caption,
       vprompt,
       image_url,
-      model_used: (modelKey || "default").toUpperCase(),
+      model_used: "AUTO",
       model_tried: modelTried,
       model_error: image_url ? null : modelError || null,
       gpt_used: !!gptUsed,
@@ -426,7 +436,7 @@ app.post("/api/image-studio", async (req, res) => {
           return image_url;
         }
         if (p.status === "failed" || p.status === "canceled") throw new Error(`prediction ${p.status} (${model}) ${p.error ? `: ${p.error}` : ""}`);
-        await sleep(WAIT_POLL_MS);
+        await sleep(1200);
       }
     }
     const jitterStrength = (base) => {
@@ -474,7 +484,7 @@ app.post("/api/image-studio", async (req, res) => {
         for (const m of MODELS) {
           try {
             const inputX = m.makeInput({ image_data, prompt: promptRaw || "" });
-            const pred = await replicateCreateBySlug(m.slug, inputX); // slug endpoint
+            const pred = await replicateCreateBySlug(m.slug, inputX);
             const image_url = await waitPrediction(pred.id, m.slug, body.max_wait_ms);
             return { image_url, model: m.slug, tried };
           } catch (e) {
@@ -594,7 +604,6 @@ app.post("/api/video-studio", async (req, res) => {
     if (mode === "image2video" && !incomingImage) {
       return res.json({ ok: false, error: "Provide 'image_url' or 'image_data_url' (or 'image')" });
     }
-    // Нормализуем: если это https — ок; если data: — убеждаемся, что base64-безопасно.
     if (incomingImage && incomingImage.startsWith("data:")) {
       const fixed = makeDataUrlSafe(incomingImage);
       if (!fixed) return res.json({ ok: false, error: "Bad data URL" });
@@ -602,7 +611,6 @@ app.post("/api/video-studio", async (req, res) => {
     } else if (incomingImage && !/^https?:\/\//i.test(incomingImage)) {
       return res.json({ ok: false, error: "image_url must be https or data:URL" });
     }
-    // --------------------------------------------------------
 
     const videoSlug =
       String(body.video_model_slug || body.replicate_video_slug || body.REPLICATE_MODEL_SLUG_VIDEO || "").trim();
@@ -638,7 +646,7 @@ app.post("/api/video-studio", async (req, res) => {
       }
     }
 
-    // IMAGE -> VIDEO (поддержка start_image | image | input_image)
+    // IMAGE -> VIDEO
     if (mode === "image2video") {
       let versionI2V = (process.env.REPLICATE_MODEL_VERSION_I2V || "").trim();
       const fallbackSlug = (process.env.REPLICATE_MODEL_SLUG_I2V_HD || "").trim();
@@ -658,7 +666,6 @@ app.post("/api/video-studio", async (req, res) => {
         String(body.camera || "auto").toLowerCase()
       ] || "auto";
 
-      // Набор вариантов параметров картинки для разных моделей
       const imageVariants = [
         { key: "start_image", value: incomingImage },
         { key: "image", value: incomingImage },
@@ -669,9 +676,7 @@ app.post("/api/video-studio", async (req, res) => {
 
       try {
         if (versionI2V) {
-          // Версионный эндпоинт (v1/predictions с version id) принимает объект в "input"
-          let got = null;
-          let lastErr = null;
+          let got = null, lastErr = null;
           for (const v of imageVariants) {
             try {
               const job = await replicatePredict(versionI2V, { ...baseInput, ...extra, [v.key]: v.value }, { tries: 240, delayMs: 1500 });
@@ -682,9 +687,7 @@ app.post("/api/video-studio", async (req, res) => {
           if (!got && lastErr) throw lastErr;
           video_url = got;
         } else {
-          // slug эндпоинт (v1/models/{slug}/predictions) — перебирам варианты
-          let got = null;
-          let lastErr = null;
+          let got = null, lastErr = null;
           for (const v of imageVariants) {
             try {
               const job = await replicateCreateBySlug(fallbackSlug, { ...baseInput, ...extra, [v.key]: v.value });
@@ -719,8 +722,11 @@ app.post("/api/video-studio", async (req, res) => {
 
 /* ====================== VIDEO REELS (caption + video) ====================== */
 app.post("/api/video-reels", async (req, res) => {
+  // ---- ЛЁГКИЙ ДЕБАГ: включается body.debug=true ----
+  const dbg = (msg, extra = {}) => console.log(`[video-reels] ${msg}`, extra);
   try {
     const body = readBody(req.body);
+    const debug = body.debug === true || body.debug === "true";
 
     const idea = (body.idea || body.prompt || "").toString().trim();
     if (!idea) return res.status(400).json({ ok: false, error: "Missing 'idea'" });
@@ -757,6 +763,8 @@ app.post("/api/video-reels", async (req, res) => {
     const maxChars = lengthTargets[length] || 220;
     const wantsEmoji = !!opts.emojis;
     const wantsHash = !!opts.auto_hashtags;
+
+    dbg("flags", { image_only, text_only, full_mode, ratio, imageModelKey, videoSlug, wantsEmoji, wantsHash });
 
     // GPT
     let caption = null, vprompt = null, gptUsed = false;
@@ -809,22 +817,23 @@ Return JSON:
         caption = `✨ ${idea}\n🚀 Learn more and take action today.\n\n➡️ Learn more\n\nhttps://hi-ai.ai #ai #automation #creativity`.slice(0, maxChars);
         vprompt = `${idea}. Clean. AR ${ratio}.`;
       }
+    } else {
+      vprompt = `${idea}. Clean. AR ${ratio}.`;
     }
 
     // VISUAL
     let video_url = null, image_url = null;
+    let tried = [];
+    let errors = [];
 
     if (text_only) {
       // nothing
     } else if (image_only && opts.image !== false) {
-      // ====== ИСПРАВЛЕНО: version → slug fallback для Regenerate Visual ======
-      const versionImg =
-        imageModelKey === "flux"
-          ? process.env.REPLICATE_MODEL_VERSION_FLUX
-          : process.env.REPLICATE_MODEL_VERSION_SDXL;
+      const versionImg = imageModelKey === "flux" ? process.env.REPLICATE_MODEL_VERSION_FLUX : process.env.REPLICATE_MODEL_VERSION_SDXL;
 
       async function tryByVersion() {
         if (!versionImg) return null;
+        tried.push(`version:${versionImg}`);
         const inputI =
           imageModelKey === "flux"
             ? { prompt: vprompt, go_fast: false, megapixels: "1", num_outputs: 1, output_format: "png", output_quality: 90 }
@@ -835,6 +844,7 @@ Return JSON:
       }
 
       async function tryBySlug() {
+        tried.push("slug:black-forest-labs/flux-schnell");
         const job = await replicateCreateBySlug("black-forest-labs/flux-schnell", {
           prompt: vprompt,
           aspect_ratio: ratio, // "9:16" / "16:9" / "1:1"
@@ -849,13 +859,16 @@ Return JSON:
 
       try {
         image_url = await tryByVersion();
-        if (!image_url) image_url = await tryBySlug();
-      } catch {
-        try { image_url = await tryBySlug(); } catch {}
+      } catch (e) {
+        errors.push(String(e));
       }
-      // ======================================================================
+      if (!image_url) {
+        try { image_url = await tryBySlug(); }
+        catch (e) { errors.push(String(e)); }
+      }
     } else if (full_mode) {
       if (videoSlug) {
+        tried.push(`videoSlug:${videoSlug}`);
         try {
           const job = await replicateCreateBySlug(videoSlug, {
             prompt: vprompt,
@@ -868,11 +881,12 @@ Return JSON:
           const out = done?.output;
           video_url = typeof out === "string" ? out : Array.isArray(out) ? out[0] : null;
         } catch (e) {
-          // fallthrough
+          errors.push(String(e));
         }
       }
 
       if (!video_url && process.env.REPLICATE_MODEL_VERSION_VIDEO) {
+        tried.push(`videoVersion:${process.env.REPLICATE_MODEL_VERSION_VIDEO}`);
         const inputV = {
           prompt: vprompt,
           size: wanSize,
@@ -884,12 +898,15 @@ Return JSON:
           const job = await replicatePredict(process.env.REPLICATE_MODEL_VERSION_VIDEO, inputV);
           const out = job?.output;
           video_url = typeof out === "string" ? out : Array.isArray(out) ? out[0] : null;
-        } catch (e) {}
+        } catch (e) {
+          errors.push(String(e));
+        }
       }
 
       if (!video_url && opts.image !== false) {
         const versionImg = imageModelKey === "flux" ? process.env.REPLICATE_MODEL_VERSION_FLUX : process.env.REPLICATE_MODEL_VERSION_SDXL;
         if (versionImg) {
+          tried.push(`imageVersion:${versionImg}`);
           const inputI =
             imageModelKey === "flux"
               ? { prompt: vprompt, go_fast: false, megapixels: "1", num_outputs: 1, output_format: "png", output_quality: 90 }
@@ -898,12 +915,41 @@ Return JSON:
             const jobI = await replicatePredict(versionImg, inputI);
             const outI = jobI?.output;
             image_url = Array.isArray(outI) ? outI[0] : typeof outI === "string" ? outI : null;
-          } catch (e) {}
+          } catch (e) {
+            errors.push(String(e));
+          }
+        } else {
+          // последний шанс картинкой
+          tried.push("imageSlug:black-forest-labs/flux-schnell");
+          try {
+            const job = await replicateCreateBySlug("black-forest-labs/flux-schnell", {
+              prompt: vprompt,
+              aspect_ratio: ratio,
+              num_outputs: 1,
+              output_format: "png",
+              output_quality: 90,
+            });
+            const done = await pollPredictionByUrl(job?.urls?.get, { tries: 240, delayMs: 1500 });
+            const out = done?.output;
+            image_url = Array.isArray(out) ? out[0] : (typeof out === "string" ? out : null);
+          } catch (e) {
+            errors.push(String(e));
+          }
         }
       }
     }
 
-    return res.json({
+    const env_flags = {
+      HAS_OPENAI: !!process.env.OPENAI_API_KEY,
+      HAS_REPLICATE: !!process.env.REPLICATE_API_TOKEN,
+      HAS_FLUX_VER: !!process.env.REPLICATE_MODEL_VERSION_FLUX,
+      HAS_SDXL_VER: !!process.env.REPLICATE_MODEL_VERSION_SDXL,
+      HAS_VIDEO_VER: !!process.env.REPLICATE_MODEL_VERSION_VIDEO,
+      HAS_I2V_VER: !!process.env.REPLICATE_MODEL_VERSION_I2V,
+      HAS_I2V_SLUG: !!process.env.REPLICATE_MODEL_SLUG_I2V_HD,
+    };
+
+    const payload = {
       ok: true,
       caption,
       vprompt,
@@ -914,8 +960,21 @@ Return JSON:
       seconds: wanSeconds,
       size_used: wanSize,
       mode: text_only ? "text_only" : image_only ? "image_only" : video_url ? "video" : image_url ? "image_fallback" : "text_only",
-    });
+    };
+
+    if (debug) {
+      payload.debug_info = {
+        flags: { text_only, image_only, full_mode, wantsEmoji, wantsHash, imageModelKey, ratio, videoSlug },
+        env_flags,
+        tried,
+        errors,
+      };
+    }
+
+    dbg("result", { mode: payload.mode, hasVideo: !!payload.video_url, hasImage: !!payload.image_url });
+    return res.json(payload);
   } catch (e) {
+    console.error("[video-reels] ERROR", e);
     res.status(200).json({ ok: false, error: String(e.message || e) });
   }
 });
