@@ -100,7 +100,7 @@ async function pollPredictionByUrl(getUrl, { tries = 240, delayMs = 1500 } = {})
   for (let i = 0; i < tries; i++) {
     last = await fetchJson(getUrl, { headers: { Authorization: `Token ${process.env.REPLICATE_API_TOKEN}` } });
     if (last.status === "succeeded") return last;
-    if (last.status === "failed" || last.status === "canceled") throw new Error(`Replicate failed: ${last?.error || last.status}`);
+    if (last.status === "failed" || last.status === "canceled") throw new Error(`Replicate failed: ${last?.error || ${}}`);
     await sleep(delayMs);
   }
   throw new Error("Replicate timeout");
@@ -178,7 +178,7 @@ app.post("/", (req, res) => {
 });
 
 /* ====================== BRAND POST ====================== */
-app.post("/api/brand-post", async (req, res) => {
+app.post("/api/brand-post", /* unchanged logic */ async (req, res) => {
   try {
     const body = readBody(req.body);
     const idea = (body.idea || body.prompt || "").toString().trim();
@@ -398,7 +398,7 @@ app.post("/api/image-studio", async (req, res) => {
     const strength = body.strength ?? DEFAULT_STRENGTH;
     const seed = body.seed ?? null;
     const seed_lock = !!body.seed_lock;
-    const camera_path = String(body.camera_path || "none").toLowerCase(); // 'none'|'orbit'
+    const camera_path = String(body.camera_path || "none").toLowerCase();
 
     let image_data = body.image_data || null;
     let mask_data = body.mask_data || null;
@@ -450,21 +450,21 @@ app.post("/api/image-studio", async (req, res) => {
 
       if (action === "text2img") {
         if (!prompt) throw new Error("prompt is required for text2img");
-        model = "black-forest-labs/flux-schnell"; // slug
+        model = "black-forest-labs/flux-schnell";
         input = { prompt, aspect_ratio: aspect, ...(seed != null ? { seed } : {}) };
         const pred = await replicateCreateBySlug(model, input);
         const url = await waitPrediction(pred.id, model, body.max_wait_ms);
         return { image_url: url, model };
       } else if (action === "img2img") {
         if (!image_data) throw new Error("image is required for img2img");
-        model = "black-forest-labs/flux-kontext-pro"; // slug
+        model = "black-forest-labs/flux-kontext-pro";
         input = { prompt: promptRaw, input_image: image_data, image: image_data, strength, output_format: "jpg", ...(seed != null ? { seed } : {}) };
         const pred = await replicateCreateBySlug(model, input);
         const url = await waitPrediction(pred.id, model, body.max_wait_ms);
         return { image_url: url, model };
       } else if (action === "inpaint") {
         if (!image_data) throw new Error("image is required for inpaint");
-        model = "black-forest-labs/flux-kontext-pro"; // slug
+        model = "black-forest-labs/flux-kontext-pro";
         input = {
           prompt: promptRaw,
           input_image: image_data,
@@ -722,7 +722,6 @@ app.post("/api/video-studio", async (req, res) => {
 
 /* ====================== VIDEO REELS (caption + video) ====================== */
 app.post("/api/video-reels", async (req, res) => {
-  // ---- ЛЁГКИЙ ДЕБАГ: включается body.debug=true ----
   const dbg = (msg, extra = {}) => console.log(`[video-reels] ${msg}`, extra);
   try {
     const body = readBody(req.body);
@@ -734,6 +733,13 @@ app.post("/api/video-reels", async (req, res) => {
     const text_only = !!body.text_only || !!body.force_text_only;
     const image_only = !!body.image_only;
     const full_mode = !text_only && !image_only;
+
+    // NEW: «требуем видео» если любой из флагов активен
+    const video_only =
+      body.video_only === true ||
+      body.require_video === true ||
+      String(body.mode || "").toLowerCase() === "video" ||
+      String(body.action || "").toLowerCase() === "text2video";
 
     const style = (body.style || "auto").toString().toLowerCase();
     const ratio = (body.ratio || "9:16").toString().replace("-", ":");
@@ -764,7 +770,7 @@ app.post("/api/video-reels", async (req, res) => {
     const wantsEmoji = !!opts.emojis;
     const wantsHash = !!opts.auto_hashtags;
 
-    dbg("flags", { image_only, text_only, full_mode, ratio, imageModelKey, videoSlug, wantsEmoji, wantsHash });
+    dbg("flags", { image_only, text_only, full_mode, video_only, ratio, imageModelKey, videoSlug, wantsEmoji, wantsHash });
 
     // GPT
     let caption = null, vprompt = null, gptUsed = false;
@@ -821,7 +827,7 @@ Return JSON:
       vprompt = `${idea}. Clean. AR ${ratio}.`;
     }
 
-    // VISUAL
+    // VISУAL
     let video_url = null, image_url = null;
     let tried = [];
     let errors = [];
@@ -829,8 +835,8 @@ Return JSON:
     if (text_only) {
       // nothing
     } else if (image_only && opts.image !== false) {
+      // картинка (как раньше)
       const versionImg = imageModelKey === "flux" ? process.env.REPLICATE_MODEL_VERSION_FLUX : process.env.REPLICATE_MODEL_VERSION_SDXL;
-
       async function tryByVersion() {
         if (!versionImg) return null;
         tried.push(`version:${versionImg}`);
@@ -842,12 +848,11 @@ Return JSON:
         const outI = jobI?.output;
         return Array.isArray(outI) ? outI[0] : (typeof outI === "string" ? outI : null);
       }
-
       async function tryBySlug() {
         tried.push("slug:black-forest-labs/flux-schnell");
         const job = await replicateCreateBySlug("black-forest-labs/flux-schnell", {
           prompt: vprompt,
-          aspect_ratio: ratio, // "9:16" / "16:9" / "1:1"
+          aspect_ratio: ratio,
           num_outputs: 1,
           output_format: "png",
           output_quality: 90,
@@ -856,17 +861,10 @@ Return JSON:
         const out = done?.output;
         return Array.isArray(out) ? out[0] : (typeof out === "string" ? out : null);
       }
-
-      try {
-        image_url = await tryByVersion();
-      } catch (e) {
-        errors.push(String(e));
-      }
-      if (!image_url) {
-        try { image_url = await tryBySlug(); }
-        catch (e) { errors.push(String(e)); }
-      }
+      try { image_url = await tryByVersion(); } catch (e) { errors.push(String(e)); }
+      if (!image_url) { try { image_url = await tryBySlug(); } catch (e) { errors.push(String(e)); } }
     } else if (full_mode) {
+      // Пытаемся ВИДЕО
       if (videoSlug) {
         tried.push(`videoSlug:${videoSlug}`);
         try {
@@ -880,11 +878,8 @@ Return JSON:
           const done = await pollPredictionByUrl(job?.urls?.get, { tries: 240, delayMs: 1500 });
           const out = done?.output;
           video_url = typeof out === "string" ? out : Array.isArray(out) ? out[0] : null;
-        } catch (e) {
-          errors.push(String(e));
-        }
+        } catch (e) { errors.push(String(e)); }
       }
-
       if (!video_url && process.env.REPLICATE_MODEL_VERSION_VIDEO) {
         tried.push(`videoVersion:${process.env.REPLICATE_MODEL_VERSION_VIDEO}`);
         const inputV = {
@@ -898,11 +893,24 @@ Return JSON:
           const job = await replicatePredict(process.env.REPLICATE_MODEL_VERSION_VIDEO, inputV);
           const out = job?.output;
           video_url = typeof out === "string" ? out : Array.isArray(out) ? out[0] : null;
-        } catch (e) {
-          errors.push(String(e));
-        }
+        } catch (e) { errors.push(String(e)); }
       }
 
+      // 🔒 НОВОЕ ПОВЕДЕНИЕ: если явно просили видео — НЕ уходим в image_fallback
+      if (!video_url && video_only) {
+        const env_flags = {
+          HAS_VIDEO_VER: !!process.env.REPLICATE_MODEL_VERSION_VIDEO,
+          HAS_VIDEO_SLUG: !!videoSlug,
+        };
+        const payload = {
+          ok: false,
+          error: "Video generation failed (video_only). Check model slug/version or logs.",
+          debug_info: debug ? { tried, errors, env_flags, vprompt } : undefined,
+        };
+        return res.status(200).json(payload);
+      }
+
+      // Иначе — старый безопасный fallback в картинку
       if (!video_url && opts.image !== false) {
         const versionImg = imageModelKey === "flux" ? process.env.REPLICATE_MODEL_VERSION_FLUX : process.env.REPLICATE_MODEL_VERSION_SDXL;
         if (versionImg) {
@@ -915,11 +923,8 @@ Return JSON:
             const jobI = await replicatePredict(versionImg, inputI);
             const outI = jobI?.output;
             image_url = Array.isArray(outI) ? outI[0] : typeof outI === "string" ? outI : null;
-          } catch (e) {
-            errors.push(String(e));
-          }
+          } catch (e) { errors.push(String(e)); }
         } else {
-          // последний шанс картинкой
           tried.push("imageSlug:black-forest-labs/flux-schnell");
           try {
             const job = await replicateCreateBySlug("black-forest-labs/flux-schnell", {
@@ -932,9 +937,7 @@ Return JSON:
             const done = await pollPredictionByUrl(job?.urls?.get, { tries: 240, delayMs: 1500 });
             const out = done?.output;
             image_url = Array.isArray(out) ? out[0] : (typeof out === "string" ? out : null);
-          } catch (e) {
-            errors.push(String(e));
-          }
+          } catch (e) { errors.push(String(e)); }
         }
       }
     }
@@ -963,12 +966,7 @@ Return JSON:
     };
 
     if (debug) {
-      payload.debug_info = {
-        flags: { text_only, image_only, full_mode, wantsEmoji, wantsHash, imageModelKey, ratio, videoSlug },
-        env_flags,
-        tried,
-        errors,
-      };
+      payload.debug_info = { flags: { text_only, image_only, full_mode, video_only, ratio, videoSlug }, env_flags, tried, errors };
     }
 
     dbg("result", { mode: payload.mode, hasVideo: !!payload.video_url, hasImage: !!payload.image_url });
