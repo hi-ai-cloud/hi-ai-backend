@@ -100,11 +100,23 @@ async function pollPredictionByUrl(getUrl, { tries = 240, delayMs = 1500 } = {})
   for (let i = 0; i < tries; i++) {
     last = await fetchJson(getUrl, { headers: { Authorization: `Token ${process.env.REPLICATE_API_TOKEN}` } });
     if (last.status === "succeeded") return last;
-    if (last.status === "failed" || last.status === "canceled") throw new Error(`Replicate failed: ${last?.error || ${}}`);
+    async function pollPredictionByUrl(getUrl, { tries = 240, delayMs = 1500 } = {}) {
+  let last = null;
+  for (let i = 0; i < tries; i++) {
+    last = await fetchJson(getUrl, {
+      headers: { Authorization: `Token ${process.env.REPLICATE_API_TOKEN}` },
+    });
+    if (last.status === "succeeded") return last;
+    if (last.status === "failed" || last.status === "canceled") {
+      throw new Error(
+        `Replicate failed: ${last?.error || last?.status || last?.logs || "unknown"}`
+      );
+    }
     await sleep(delayMs);
   }
   throw new Error("Replicate timeout");
 }
+
 
 async function replicatePredict(version, input, pollCfg) {
   const job = await replicateCreate(version, input);
@@ -980,3 +992,4 @@ Return JSON:
 /* ====================== START ====================== */
 const port = process.env.PORT || 8080;
 app.listen(port, () => console.log(`HI-AI backend on :${port}`));
+
