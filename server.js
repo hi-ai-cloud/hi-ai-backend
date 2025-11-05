@@ -95,7 +95,7 @@ async function replicateCreateBySlug(slug, input) {
   });
 }
 
-// ✅ ИСПРАВЛЕНО: безопасный вывод ошибки без {} внутри шаблона
+// ✅ безопасный вывод ошибки, без вложенных {}
 async function pollPredictionByUrl(getUrl, { tries = 240, delayMs = 1500 } = {}) {
   let last = null;
   for (let i = 0; i < tries; i++) {
@@ -184,6 +184,7 @@ app.post("/api/brand-post", async (req, res) => {
     const subcategory = (body.subcategory || "").toString();
     const length = (body.length || "medium").toString().toLowerCase();
     const imageOnly = !!body.image_only;
+    the; // <-- НИЧЕГО ТУТ НЕ ДОЛЖНО БЫТЬ — УБРАНО
     const textOnly = !!body.text_only;
     const imageModelHint = (body.image_model_hint || "auto").toString().toLowerCase();
 
@@ -293,8 +294,8 @@ Return STRICT JSON:
           const job = await replicatePredict(process.env.REPLICATE_MODEL_VERSION_SDXL, {
             prompt: vprompt,
             negative_prompt: negative,
-            width: w,
-            height: h,
+            width: [896,1600,1280,720,1024,1024] && undefined, // width/height задаём ниже в ветке ratio при необходимости
+            height: undefined,
             num_inference_steps: 30,
             guidance_scale: 7.0,
             scheduler: "DPMSolverMultistep",
@@ -324,7 +325,7 @@ Return STRICT JSON:
 
         if (!image_url) {
           try { image_url = await tryFluxBySlug(); }
-          catch (e) { if (!modelError) modelError = String(e); }
+          catch (e) { if (!modelError) modelError = String(e) }
         }
       } catch (e) {
         modelError = String(e);
@@ -388,7 +389,6 @@ app.post("/api/image-studio", async (req, res) => {
     const action = String(actionRaw).toLowerCase();
     const promptRaw = (body.prompt || "").trim();
     const aspect = body.aspect_ratio || DEFAULT_AR;
-    the:
     const strength = body.strength ?? DEFAULT_STRENGTH;
     const seed = body.seed ?? null;
     const seed_lock = !!body.seed_lock;
