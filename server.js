@@ -817,18 +817,43 @@ Return JSON:
     if (text_only) {
       // nothing
     } else if (image_only && opts.image !== false) {
-      const versionImg = imageModelKey === "flux" ? process.env.REPLICATE_MODEL_VERSION_FLUX : process.env.REPLICATE_MODEL_VERSION_SDXL;
-      if (versionImg) {
+      // ====== ИСПРАВЛЕНО: version → slug fallback для Regenerate Visual ======
+      const versionImg =
+        imageModelKey === "flux"
+          ? process.env.REPLICATE_MODEL_VERSION_FLUX
+          : process.env.REPLICATE_MODEL_VERSION_SDXL;
+
+      async function tryByVersion() {
+        if (!versionImg) return null;
         const inputI =
           imageModelKey === "flux"
             ? { prompt: vprompt, go_fast: false, megapixels: "1", num_outputs: 1, output_format: "png", output_quality: 90 }
             : { prompt: vprompt, width: w, height: h, num_inference_steps: 30, guidance_scale: 7.0, num_outputs: 1 };
-        try {
-          const jobI = await replicatePredict(versionImg, inputI);
-          const outI = jobI?.output;
-          image_url = Array.isArray(outI) ? outI[0] : typeof outI === "string" ? outI : null;
-        } catch (e) {}
+        const jobI = await replicatePredict(versionImg.trim(), inputI);
+        const outI = jobI?.output;
+        return Array.isArray(outI) ? outI[0] : (typeof outI === "string" ? outI : null);
       }
+
+      async function tryBySlug() {
+        const job = await replicateCreateBySlug("black-forest-labs/flux-schnell", {
+          prompt: vprompt,
+          aspect_ratio: ratio, // "9:16" / "16:9" / "1:1"
+          num_outputs: 1,
+          output_format: "png",
+          output_quality: 90,
+        });
+        const done = await pollPredictionByUrl(job?.urls?.get, { tries: 240, delayMs: 1500 });
+        const out = done?.output;
+        return Array.isArray(out) ? out[0] : (typeof out === "string" ? out : null);
+      }
+
+      try {
+        image_url = await tryByVersion();
+        if (!image_url) image_url = await tryBySlug();
+      } catch {
+        try { image_url = await tryBySlug(); } catch {}
+      }
+      // ======================================================================
     } else if (full_mode) {
       if (videoSlug) {
         try {
