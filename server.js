@@ -184,7 +184,6 @@ app.post("/api/brand-post", async (req, res) => {
     const subcategory = (body.subcategory || "").toString();
     const length = (body.length || "medium").toString().toLowerCase();
     const imageOnly = !!body.image_only;
-    the; // <-- НИЧЕГО ТУТ НЕ ДОЛЖНО БЫТЬ — УБРАНО
     const textOnly = !!body.text_only;
     const imageModelHint = (body.image_model_hint || "auto").toString().toLowerCase();
 
@@ -994,5 +993,6 @@ Return JSON:
 /* ====================== START ====================== */
 const port = process.env.PORT || 8080;
 app.listen(port, () => console.log(`HI-AI backend on :${port}`));
+
 
 
