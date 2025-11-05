@@ -95,28 +95,19 @@ async function replicateCreateBySlug(slug, input) {
   });
 }
 
+// ✅ ИСПРАВЛЕНО: безопасный вывод ошибки без {} внутри шаблона
 async function pollPredictionByUrl(getUrl, { tries = 240, delayMs = 1500 } = {}) {
   let last = null;
   for (let i = 0; i < tries; i++) {
     last = await fetchJson(getUrl, { headers: { Authorization: `Token ${process.env.REPLICATE_API_TOKEN}` } });
     if (last.status === "succeeded") return last;
-    async function pollPredictionByUrl(getUrl, { tries = 240, delayMs = 1500 } = {}) {
-  let last = null;
-  for (let i = 0; i < tries; i++) {
-    last = await fetchJson(getUrl, {
-      headers: { Authorization: `Token ${process.env.REPLICATE_API_TOKEN}` },
-    });
-    if (last.status === "succeeded") return last;
     if (last.status === "failed" || last.status === "canceled") {
-      throw new Error(
-        `Replicate failed: ${last?.error || last?.status || last?.logs || "unknown"}`
-      );
+      throw new Error(`Replicate failed: ${last?.error || last?.status || last?.logs || "unknown"}`);
     }
     await sleep(delayMs);
   }
   throw new Error("Replicate timeout");
 }
-
 
 async function replicatePredict(version, input, pollCfg) {
   const job = await replicateCreate(version, input);
@@ -161,16 +152,6 @@ app.get("/env-check", (_, res) => {
   });
 });
 
-/* ====================== PRELIGHT (CORS OPTIONS) ====================== */
-app.options("*", (req, res) => {
-  res.set({
-    "Access-Control-Allow-Origin": "*",
-    "Access-Control-Allow-Methods": "GET,POST,OPTIONS",
-    "Access-Control-Allow-Headers": "Content-Type, Authorization",
-  });
-  res.sendStatus(200);
-});
-
 /* ====================== SMART ROOT DISPATCH ====================== */
 app.post("/", (req, res) => {
   const body = readBody(req.body);
@@ -190,7 +171,7 @@ app.post("/", (req, res) => {
 });
 
 /* ====================== BRAND POST ====================== */
-app.post("/api/brand-post", /* unchanged logic */ async (req, res) => {
+app.post("/api/brand-post", async (req, res) => {
   try {
     const body = readBody(req.body);
     const idea = (body.idea || body.prompt || "").toString().trim();
@@ -261,16 +242,16 @@ Return STRICT JSON:
         const s = text.indexOf("{"), e = text.lastIndexOf("}");
         const parsed = JSON.parse(s >= 0 && e >= 0 ? text.slice(s, e + 1) : "{}");
 
-        let cap = (parsed.caption || "").toString().trim();
-        let vis = (parsed.visual_prompt || "").toString().trim();
+        caption = (parsed.caption || "").toString().trim();
+        vprompt = (parsed.visual_prompt || "").toString().trim();
 
-        if (!cap || !vis) throw new Error("Empty fields in GPT JSON");
-        if (cap.length > Math.round(maxChars * 1.1)) {
-          const cut = cap.slice(0, Math.round(maxChars * 1.1));
+        if (!caption || !vprompt) throw new Error("Empty fields in GPT JSON");
+        if (caption.length > Math.round(maxChars * 1.1)) {
+          const cut = caption.slice(0, Math.round(maxChars * 1.1));
           const idx = Math.max(cut.lastIndexOf(". "), cut.lastIndexOf(" "), Math.floor(cut.length * 0.9));
-          cap = cut.slice(0, idx).trim() + "…";
+          caption = cut.slice(0, idx).trim() + "…";
         }
-        caption = cap; vprompt = vis; gptUsed = true;
+        gptUsed = true;
       } catch (e) {
         caption = `✨ ${idea}\n🚀 Learn more and take action today.\n\n➡️ Learn more\n\nhttps://hi-ai.ai #ai #automation #creativity`.slice(0, maxChars);
         vprompt = `${idea}. Modern minimalist beige & orange, warm light, clean bg, no text. AR ${ratio}.`;
@@ -312,8 +293,8 @@ Return STRICT JSON:
           const job = await replicatePredict(process.env.REPLICATE_MODEL_VERSION_SDXL, {
             prompt: vprompt,
             negative_prompt: negative,
-            width: 1024,
-            height: 1024,
+            width: w,
+            height: h,
             num_inference_steps: 30,
             guidance_scale: 7.0,
             scheduler: "DPMSolverMultistep",
@@ -335,7 +316,7 @@ Return STRICT JSON:
         }
 
         try {
-          if (process.env.REPLICATE_MODEL_VERSION_FLUX) image_url = await tryFluxByVersion();
+          if (modelKey === "flux" && process.env.REPLICATE_MODEL_VERSION_FLUX) image_url = await tryFluxByVersion();
           else if (process.env.REPLICATE_MODEL_VERSION_SDXL) image_url = await trySDXLByVersion();
         } catch (e) {
           modelError = String(e);
@@ -355,7 +336,7 @@ Return STRICT JSON:
       caption: textOnly || !caption ? caption || null : caption,
       vprompt,
       image_url,
-      model_used: "AUTO",
+      model_used: (modelKey || "default").toUpperCase(),
       model_tried: modelTried,
       model_error: image_url ? null : modelError || null,
       gpt_used: !!gptUsed,
@@ -407,10 +388,11 @@ app.post("/api/image-studio", async (req, res) => {
     const action = String(actionRaw).toLowerCase();
     const promptRaw = (body.prompt || "").trim();
     const aspect = body.aspect_ratio || DEFAULT_AR;
+    the:
     const strength = body.strength ?? DEFAULT_STRENGTH;
     const seed = body.seed ?? null;
     const seed_lock = !!body.seed_lock;
-    const camera_path = String(body.camera_path || "none").toLowerCase();
+    const camera_path = String(body.camera_path || "none").toLowerCase(); // 'none'|'orbit'
 
     let image_data = body.image_data || null;
     let mask_data = body.mask_data || null;
@@ -448,7 +430,7 @@ app.post("/api/image-studio", async (req, res) => {
           return image_url;
         }
         if (p.status === "failed" || p.status === "canceled") throw new Error(`prediction ${p.status} (${model}) ${p.error ? `: ${p.error}` : ""}`);
-        await sleep(1200);
+        await sleep(WAIT_POLL_MS);
       }
     }
     const jitterStrength = (base) => {
@@ -462,21 +444,21 @@ app.post("/api/image-studio", async (req, res) => {
 
       if (action === "text2img") {
         if (!prompt) throw new Error("prompt is required for text2img");
-        model = "black-forest-labs/flux-schnell";
+        model = "black-forest-labs/flux-schnell"; // slug
         input = { prompt, aspect_ratio: aspect, ...(seed != null ? { seed } : {}) };
         const pred = await replicateCreateBySlug(model, input);
         const url = await waitPrediction(pred.id, model, body.max_wait_ms);
         return { image_url: url, model };
       } else if (action === "img2img") {
         if (!image_data) throw new Error("image is required for img2img");
-        model = "black-forest-labs/flux-kontext-pro";
+        model = "black-forest-labs/flux-kontext-pro"; // slug
         input = { prompt: promptRaw, input_image: image_data, image: image_data, strength, output_format: "jpg", ...(seed != null ? { seed } : {}) };
         const pred = await replicateCreateBySlug(model, input);
         const url = await waitPrediction(pred.id, model, body.max_wait_ms);
         return { image_url: url, model };
       } else if (action === "inpaint") {
         if (!image_data) throw new Error("image is required for inpaint");
-        model = "black-forest-labs/flux-kontext-pro";
+        model = "black-forest-labs/flux-kontext-pro"; // slug
         input = {
           prompt: promptRaw,
           input_image: image_data,
@@ -496,7 +478,7 @@ app.post("/api/image-studio", async (req, res) => {
         for (const m of MODELS) {
           try {
             const inputX = m.makeInput({ image_data, prompt: promptRaw || "" });
-            const pred = await replicateCreateBySlug(m.slug, inputX);
+            const pred = await replicateCreateBySlug(m.slug, inputX); // slug endpoint
             const image_url = await waitPrediction(pred.id, m.slug, body.max_wait_ms);
             return { image_url, model: m.slug, tried };
           } catch (e) {
@@ -688,7 +670,8 @@ app.post("/api/video-studio", async (req, res) => {
 
       try {
         if (versionI2V) {
-          let got = null, lastErr = null;
+          let got = null;
+          let lastErr = null;
           for (const v of imageVariants) {
             try {
               const job = await replicatePredict(versionI2V, { ...baseInput, ...extra, [v.key]: v.value }, { tries: 240, delayMs: 1500 });
@@ -699,7 +682,8 @@ app.post("/api/video-studio", async (req, res) => {
           if (!got && lastErr) throw lastErr;
           video_url = got;
         } else {
-          let got = null, lastErr = null;
+          let got = null;
+          let lastErr = null;
           for (const v of imageVariants) {
             try {
               const job = await replicateCreateBySlug(fallbackSlug, { ...baseInput, ...extra, [v.key]: v.value });
@@ -734,10 +718,8 @@ app.post("/api/video-studio", async (req, res) => {
 
 /* ====================== VIDEO REELS (caption + video) ====================== */
 app.post("/api/video-reels", async (req, res) => {
-  const dbg = (msg, extra = {}) => console.log(`[video-reels] ${msg}`, extra);
   try {
     const body = readBody(req.body);
-    const debug = body.debug === true || body.debug === "true";
 
     const idea = (body.idea || body.prompt || "").toString().trim();
     if (!idea) return res.status(400).json({ ok: false, error: "Missing 'idea'" });
@@ -745,13 +727,6 @@ app.post("/api/video-reels", async (req, res) => {
     const text_only = !!body.text_only || !!body.force_text_only;
     const image_only = !!body.image_only;
     const full_mode = !text_only && !image_only;
-
-    // NEW: «требуем видео» если любой из флагов активен
-    const video_only =
-      body.video_only === true ||
-      body.require_video === true ||
-      String(body.mode || "").toLowerCase() === "video" ||
-      String(body.action || "").toLowerCase() === "text2video";
 
     const style = (body.style || "auto").toString().toLowerCase();
     const ratio = (body.ratio || "9:16").toString().replace("-", ":");
@@ -781,8 +756,6 @@ app.post("/api/video-reels", async (req, res) => {
     const maxChars = lengthTargets[length] || 220;
     const wantsEmoji = !!opts.emojis;
     const wantsHash = !!opts.auto_hashtags;
-
-    dbg("flags", { image_only, text_only, full_mode, video_only, ratio, imageModelKey, videoSlug, wantsEmoji, wantsHash });
 
     // GPT
     let caption = null, vprompt = null, gptUsed = false;
@@ -835,50 +808,28 @@ Return JSON:
         caption = `✨ ${idea}\n🚀 Learn more and take action today.\n\n➡️ Learn more\n\nhttps://hi-ai.ai #ai #automation #creativity`.slice(0, maxChars);
         vprompt = `${idea}. Clean. AR ${ratio}.`;
       }
-    } else {
-      vprompt = `${idea}. Clean. AR ${ratio}.`;
     }
 
-    // VISУAL
+    // VISUAL
     let video_url = null, image_url = null;
-    let tried = [];
-    let errors = [];
 
     if (text_only) {
       // nothing
     } else if (image_only && opts.image !== false) {
-      // картинка (как раньше)
       const versionImg = imageModelKey === "flux" ? process.env.REPLICATE_MODEL_VERSION_FLUX : process.env.REPLICATE_MODEL_VERSION_SDXL;
-      async function tryByVersion() {
-        if (!versionImg) return null;
-        tried.push(`version:${versionImg}`);
+      if (versionImg) {
         const inputI =
           imageModelKey === "flux"
             ? { prompt: vprompt, go_fast: false, megapixels: "1", num_outputs: 1, output_format: "png", output_quality: 90 }
             : { prompt: vprompt, width: w, height: h, num_inference_steps: 30, guidance_scale: 7.0, num_outputs: 1 };
-        const jobI = await replicatePredict(versionImg.trim(), inputI);
-        const outI = jobI?.output;
-        return Array.isArray(outI) ? outI[0] : (typeof outI === "string" ? outI : null);
+        try {
+          const jobI = await replicatePredict(versionImg, inputI);
+          const outI = jobI?.output;
+          image_url = Array.isArray(outI) ? outI[0] : typeof outI === "string" ? outI : null;
+        } catch (e) {}
       }
-      async function tryBySlug() {
-        tried.push("slug:black-forest-labs/flux-schnell");
-        const job = await replicateCreateBySlug("black-forest-labs/flux-schnell", {
-          prompt: vprompt,
-          aspect_ratio: ratio,
-          num_outputs: 1,
-          output_format: "png",
-          output_quality: 90,
-        });
-        const done = await pollPredictionByUrl(job?.urls?.get, { tries: 240, delayMs: 1500 });
-        const out = done?.output;
-        return Array.isArray(out) ? out[0] : (typeof out === "string" ? out : null);
-      }
-      try { image_url = await tryByVersion(); } catch (e) { errors.push(String(e)); }
-      if (!image_url) { try { image_url = await tryBySlug(); } catch (e) { errors.push(String(e)); } }
     } else if (full_mode) {
-      // Пытаемся ВИДЕО
       if (videoSlug) {
-        tried.push(`videoSlug:${videoSlug}`);
         try {
           const job = await replicateCreateBySlug(videoSlug, {
             prompt: vprompt,
@@ -890,10 +841,12 @@ Return JSON:
           const done = await pollPredictionByUrl(job?.urls?.get, { tries: 240, delayMs: 1500 });
           const out = done?.output;
           video_url = typeof out === "string" ? out : Array.isArray(out) ? out[0] : null;
-        } catch (e) { errors.push(String(e)); }
+        } catch (e) {
+          // fallthrough
+        }
       }
+
       if (!video_url && process.env.REPLICATE_MODEL_VERSION_VIDEO) {
-        tried.push(`videoVersion:${process.env.REPLICATE_MODEL_VERSION_VIDEO}`);
         const inputV = {
           prompt: vprompt,
           size: wanSize,
@@ -905,28 +858,12 @@ Return JSON:
           const job = await replicatePredict(process.env.REPLICATE_MODEL_VERSION_VIDEO, inputV);
           const out = job?.output;
           video_url = typeof out === "string" ? out : Array.isArray(out) ? out[0] : null;
-        } catch (e) { errors.push(String(e)); }
+        } catch (e) {}
       }
 
-      // 🔒 НОВОЕ ПОВЕДЕНИЕ: если явно просили видео — НЕ уходим в image_fallback
-      if (!video_url && video_only) {
-        const env_flags = {
-          HAS_VIDEO_VER: !!process.env.REPLICATE_MODEL_VERSION_VIDEO,
-          HAS_VIDEO_SLUG: !!videoSlug,
-        };
-        const payload = {
-          ok: false,
-          error: "Video generation failed (video_only). Check model slug/version or logs.",
-          debug_info: debug ? { tried, errors, env_flags, vprompt } : undefined,
-        };
-        return res.status(200).json(payload);
-      }
-
-      // Иначе — старый безопасный fallback в картинку
       if (!video_url && opts.image !== false) {
         const versionImg = imageModelKey === "flux" ? process.env.REPLICATE_MODEL_VERSION_FLUX : process.env.REPLICATE_MODEL_VERSION_SDXL;
         if (versionImg) {
-          tried.push(`imageVersion:${versionImg}`);
           const inputI =
             imageModelKey === "flux"
               ? { prompt: vprompt, go_fast: false, megapixels: "1", num_outputs: 1, output_format: "png", output_quality: 90 }
@@ -935,36 +872,12 @@ Return JSON:
             const jobI = await replicatePredict(versionImg, inputI);
             const outI = jobI?.output;
             image_url = Array.isArray(outI) ? outI[0] : typeof outI === "string" ? outI : null;
-          } catch (e) { errors.push(String(e)); }
-        } else {
-          tried.push("imageSlug:black-forest-labs/flux-schnell");
-          try {
-            const job = await replicateCreateBySlug("black-forest-labs/flux-schnell", {
-              prompt: vprompt,
-              aspect_ratio: ratio,
-              num_outputs: 1,
-              output_format: "png",
-              output_quality: 90,
-            });
-            const done = await pollPredictionByUrl(job?.urls?.get, { tries: 240, delayMs: 1500 });
-            const out = done?.output;
-            image_url = Array.isArray(out) ? out[0] : (typeof out === "string" ? out : null);
-          } catch (e) { errors.push(String(e)); }
+          } catch (e) {}
         }
       }
     }
 
-    const env_flags = {
-      HAS_OPENAI: !!process.env.OPENAI_API_KEY,
-      HAS_REPLICATE: !!process.env.REPLICATE_API_TOKEN,
-      HAS_FLUX_VER: !!process.env.REPLICATE_MODEL_VERSION_FLUX,
-      HAS_SDXL_VER: !!process.env.REPLICATE_MODEL_VERSION_SDXL,
-      HAS_VIDEO_VER: !!process.env.REPLICATE_MODEL_VERSION_VIDEO,
-      HAS_I2V_VER: !!process.env.REPLICATE_MODEL_VERSION_I2V,
-      HAS_I2V_SLUG: !!process.env.REPLICATE_MODEL_SLUG_I2V_HD,
-    };
-
-    const payload = {
+    return res.json({
       ok: true,
       caption,
       vprompt,
@@ -975,16 +888,8 @@ Return JSON:
       seconds: wanSeconds,
       size_used: wanSize,
       mode: text_only ? "text_only" : image_only ? "image_only" : video_url ? "video" : image_url ? "image_fallback" : "text_only",
-    };
-
-    if (debug) {
-      payload.debug_info = { flags: { text_only, image_only, full_mode, video_only, ratio, videoSlug }, env_flags, tried, errors };
-    }
-
-    dbg("result", { mode: payload.mode, hasVideo: !!payload.video_url, hasImage: !!payload.image_url });
-    return res.json(payload);
+    });
   } catch (e) {
-    console.error("[video-reels] ERROR", e);
     res.status(200).json({ ok: false, error: String(e.message || e) });
   }
 });
@@ -992,4 +897,3 @@ Return JSON:
 /* ====================== START ====================== */
 const port = process.env.PORT || 8080;
 app.listen(port, () => console.log(`HI-AI backend on :${port}`));
-
