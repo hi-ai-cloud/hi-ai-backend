@@ -721,17 +721,27 @@ app.post("/api/video-reels", async (req, res) => {
   try {
     const body = readBody(req.body);
 
+    // --- Новые флаги из заголовков ---
+    const forceVideoHeader = String(req.header("X-Force-Video") || "").trim() === "1";
+    const textOnlyHeader   = String(req.header("X-Text-Only") || "").trim() === "1";
+
     const idea = (body.idea || body.prompt || "").toString().trim();
     if (!idea) return res.status(400).json({ ok: false, error: "Missing 'idea'" });
 
-    const text_only = !!body.text_only || !!body.force_text_only;
+    // текст/картинка/фулл
+    const text_only  = textOnlyHeader || !!body.text_only || !!body.force_text_only;
     const image_only = !!body.image_only;
-    const full_mode = !text_only && !image_only;
+    const requestedMode = String(body.mode || "").toLowerCase(); // "text2video" | "video" | "image" | ""
+    const force_video = forceVideoHeader || requestedMode === "text2video" || requestedMode === "video" || requestedMode === "reels";
 
     const style = (body.style || "auto").toString().toLowerCase();
     const ratio = (body.ratio || "9:16").toString().replace("-", ":");
     const length = (body.length || "medium").toString().toLowerCase();
-    const opts = typeof body.options === "object" ? body.options : { image: true };
+    const optsIn = typeof body.options === "object" ? body.options : { image: true };
+
+    // если форсим видео — запрещаем внутренний откат к картинке
+    const opts = force_video ? { ...optsIn, image: false } : optsIn;
+
     const category = (body.category || "General").toString();
     const subcategory = (body.subcategory || "").toString();
     const preset = (body.preset || "neutral").toString();
@@ -757,7 +767,7 @@ app.post("/api/video-reels", async (req, res) => {
     const wantsEmoji = !!opts.emojis;
     const wantsHash = !!opts.auto_hashtags;
 
-    // GPT
+    // --- GPT: caption + vprompt ---
     let caption = null, vprompt = null, gptUsed = false;
     if (!image_only) {
       const openai = new OpenAI({ apiKey: process.env.OPENAI_API_KEY });
@@ -804,31 +814,34 @@ Return JSON:
           caption = cut.slice(0, idx).trim() + "…";
         }
         gptUsed = true;
-      } catch (e) {
+      } catch {
         caption = `✨ ${idea}\n🚀 Learn more and take action today.\n\n➡️ Learn more\n\nhttps://hi-ai.ai #ai #automation #creativity`.slice(0, maxChars);
         vprompt = `${idea}. Clean. AR ${ratio}.`;
       }
     }
 
-    // VISUAL
-    let video_url = null, image_url = null;
-
+    // --- Визуал ---
+    // 1) Только текст
     if (text_only) {
-      // nothing
-    } else if (image_only && opts.image !== false) {
-      const versionImg = imageModelKey === "flux" ? process.env.REPLICATE_MODEL_VERSION_FLUX : process.env.REPLICATE_MODEL_VERSION_SDXL;
-      if (versionImg) {
-        const inputI =
-          imageModelKey === "flux"
-            ? { prompt: vprompt, go_fast: false, megapixels: "1", num_outputs: 1, output_format: "png", output_quality: 90 }
-            : { prompt: vprompt, width: w, height: h, num_inference_steps: 30, guidance_scale: 7.0, num_outputs: 1 };
-        try {
-          const jobI = await replicatePredict(versionImg, inputI);
-          const outI = jobI?.output;
-          image_url = Array.isArray(outI) ? outI[0] : typeof outI === "string" ? outI : null;
-        } catch (e) {}
-      }
-    } else if (full_mode) {
+      return res.json({
+        ok: true,
+        caption,
+        vprompt,
+        video_url: null,
+        image_url: null,
+        gpt_used: !!gptUsed,
+        ratio,
+        seconds: wanSeconds,
+        size_used: wanSize,
+        mode: "text_only",
+      });
+    }
+
+    // 2) Форс-видео: без fallback-а в картинку
+    if (force_video) {
+      let video_url = null;
+
+      // a) пробуем по slug
       if (videoSlug) {
         try {
           const job = await replicateCreateBySlug(videoSlug, {
@@ -841,39 +854,122 @@ Return JSON:
           const done = await pollPredictionByUrl(job?.urls?.get, { tries: 240, delayMs: 1500 });
           const out = done?.output;
           video_url = typeof out === "string" ? out : Array.isArray(out) ? out[0] : null;
-        } catch (e) {
-          // fallthrough
-        }
+        } catch {}
       }
 
+      // b) пробуем по version id
       if (!video_url && process.env.REPLICATE_MODEL_VERSION_VIDEO) {
-        const inputV = {
+        try {
+          const job = await replicatePredict(process.env.REPLICATE_MODEL_VERSION_VIDEO, {
+            prompt: vprompt,
+            size: wanSize,
+            duration: wanSeconds,
+            negative_prompt: "text, logo, watermark, letters, subtitles",
+            enable_prompt_expansion: true,
+          });
+          const out = job?.output;
+          video_url = typeof out === "string" ? out : Array.isArray(out) ? out[0] : null;
+        } catch {}
+      }
+
+      if (!video_url) {
+        return res.status(502).json({
+          ok: false,
+          error: "Video generation failed (forced). Check model slug/version logs.",
+        });
+      }
+
+      return res.json({
+        ok: true,
+        caption: null, // хочешь — верни caption
+        vprompt,
+        video_url,
+        image_url: null,
+        gpt_used: !!gptUsed,
+        ratio,
+        seconds: wanSeconds,
+        size_used: wanSize,
+        mode: "video",
+      });
+    }
+
+    // 3) Только картинка (явно)
+    if (image_only && opts.image !== false) {
+      let image_url = null;
+      const versionImg = imageModelKey === "flux" ? process.env.REPLICATE_MODEL_VERSION_FLUX : process.env.REPLICATE_MODEL_VERSION_SDXL;
+      if (versionImg) {
+        const inputI =
+          imageModelKey === "flux"
+            ? { prompt: vprompt, go_fast: false, megapixels: "1", num_outputs: 1, output_format: "png", output_quality: 90 }
+            : { prompt: vprompt, width: w, height: h, num_inference_steps: 30, guidance_scale: 7.0, num_outputs: 1 };
+        try {
+          const jobI = await replicatePredict(versionImg, inputI);
+          const outI = jobI?.output;
+          image_url = Array.isArray(outI) ? outI[0] : typeof outI === "string" ? outI : null;
+        } catch {}
+      }
+
+      return res.json({
+        ok: true,
+        caption,
+        vprompt,
+        video_url: null,
+        image_url: image_url || null,
+        gpt_used: !!gptUsed,
+        ratio,
+        seconds: wanSeconds,
+        size_used: wanSize,
+        mode: "image_only",
+      });
+    }
+
+    // 4) Стандартный “full” (может упасть в картинку, НО только если не форсили видео)
+    let video_url = null, image_url = null;
+
+    // сначала slug
+    if (videoSlug) {
+      try {
+        const job = await replicateCreateBySlug(videoSlug, {
           prompt: vprompt,
           size: wanSize,
           duration: wanSeconds,
           negative_prompt: "text, logo, watermark, letters, subtitles",
           enable_prompt_expansion: true,
-        };
-        try {
-          const job = await replicatePredict(process.env.REPLICATE_MODEL_VERSION_VIDEO, inputV);
-          const out = job?.output;
-          video_url = typeof out === "string" ? out : Array.isArray(out) ? out[0] : null;
-        } catch (e) {}
-      }
+        });
+        const done = await pollPredictionByUrl(job?.urls?.get, { tries: 240, delayMs: 1500 });
+        const out = done?.output;
+        video_url = typeof out === "string" ? out : Array.isArray(out) ? out[0] : null;
+      } catch {}
+    }
 
-      if (!video_url && opts.image !== false) {
-        const versionImg = imageModelKey === "flux" ? process.env.REPLICATE_MODEL_VERSION_FLUX : process.env.REPLICATE_MODEL_VERSION_SDXL;
-        if (versionImg) {
-          const inputI =
-            imageModelKey === "flux"
-              ? { prompt: vprompt, go_fast: false, megapixels: "1", num_outputs: 1, output_format: "png", output_quality: 90 }
-              : { prompt: vprompt, width: w, height: h, num_inference_steps: 30, guidance_scale: 7.0, num_outputs: 1 };
-          try {
-            const jobI = await replicatePredict(versionImg, inputI);
-            const outI = jobI?.output;
-            image_url = Array.isArray(outI) ? outI[0] : typeof outI === "string" ? outI : null;
-          } catch (e) {}
-        }
+    // потом version id
+    if (!video_url && process.env.REPLICATE_MODEL_VERSION_VIDEO) {
+      try {
+        const job = await replicatePredict(process.env.REPLICATE_MODEL_VERSION_VIDEO, {
+          prompt: vprompt,
+          size: wanSize,
+          duration: wanSeconds,
+          negative_prompt: "text, logo, watermark, letters, subtitles",
+          enable_prompt_expansion: true,
+        });
+        const out = job?.output;
+        video_url = typeof out === "string" ? out : Array.isArray(out) ? out[0] : null;
+      } catch {}
+    }
+
+    // если видео не получилось И НЕ форсили — делаем картинку, если разрешено
+    if (!video_url && opts.image !== false) {
+      const versionImg = imageModelKey === "flux" ? process.env.REPLICATE_MODEL_VERSION_FLUX : process.env.REPLICATE_MODEL_VERSION_SDXL;
+      if (versionImg) {
+        const inputI =
+          imageModelKey === "flux"
+            ? { prompt: vprompt, go_fast: false, megapixels: "1", num_outputs: 1, output_format: "png", output_quality: 90 }
+            : { prompt: vprompt, width: w, height: h, num_inference_steps: 30, guidance_scale: 7.0, num_outputs: 1 };
+        try {
+          const jobI = await replicatePredict(versionImg, inputI);
+          const outI = jobI?.output;
+          image_url = Array.isArray(outI) ? outI[0] : typeof outI === "string" ? outI : null;
+        } catch {}
       }
     }
 
@@ -887,14 +983,16 @@ Return JSON:
       ratio,
       seconds: wanSeconds,
       size_used: wanSize,
-      mode: text_only ? "text_only" : image_only ? "image_only" : video_url ? "video" : image_url ? "image_fallback" : "text_only",
+      mode: video_url ? "video" : image_url ? "image_fallback" : "text_only",
     });
   } catch (e) {
-    res.status(200).json({ ok: false, error: String(e.message || e) });
+    // важно: 500, чтобы фронт увидел ошибку, а не "ok:true"
+    res.status(500).json({ ok: false, error: String(e.message || e) });
   }
 });
 
 /* ====================== START ====================== */
 const port = process.env.PORT || 8080;
 app.listen(port, () => console.log(`HI-AI backend on :${port}`));
+
 
