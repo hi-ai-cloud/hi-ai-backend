@@ -1,78 +1,28 @@
 // server.js
-// HI-AI HUB — Unified Backend (Brand Post + Image/Video Studio)
-// ESM (Node 18+), Express + CORS + Uploads
+// HI-AI HUB — Unified Backend (Brand Post + Image Studio + Video Studio + Video Reels)
+// Express + OpenAI + Replicate (polling, data:URL safe, model routing fixed for Replicate 2025)
 
 import express from "express";
 import cors from "cors";
-import fetch from "node-fetch"; // если используешь где-то ещё
+import fetch from "node-fetch";
 import OpenAI from "openai";
 import "dotenv/config";
 
+// [ADDED] — минимальные импорты для аплоада и статики
 import multer from "multer";
 import path from "path";
 import fs from "fs";
-import { fileURLToPath } from "url";
+import { fileURLToPath } from "url"; // для __dirname в ESM
 
+// [ADDED] — безопасный __dirname для ESM
 const __filename = fileURLToPath(import.meta.url);
 const __dirname  = path.dirname(__filename);
 
 const app = express();
-
-// --- Core middlewares
 app.use(cors());
 app.use(express.json({ limit: "30mb" }));
-app.use(express.urlencoded({ extended: true, limit: "30mb" }));
 
-// --- Static /public and /uploads
-const PUBLIC_DIR  = path.join(__dirname, "public");
-const UPLOAD_DIR  = path.join(PUBLIC_DIR, "uploads");
-fs.mkdirSync(UPLOAD_DIR, { recursive: true });
-
-// Отдача статики (в т.ч. /uploads/*)
-app.use(
-  "/uploads",
-  express.static(UPLOAD_DIR, {
-    setHeaders: (res) => {
-      res.setHeader("Access-Control-Allow-Origin", "*"); // для <img crossOrigin="anonymous">
-      res.setHeader("Cache-Control", "public, max-age=31536000, immutable");
-    },
-  })
-);
-app.use(express.static(PUBLIC_DIR)); // если нужны и другие статики из /public
-
-// --- File upload: /api/upload
-const upload = multer({
-  storage: multer.memoryStorage(),
-  limits: { fileSize: 15 * 1024 * 1024 }, // 15MB
-});
-
-app.post("/api/upload", upload.single("file"), async (req, res) => {
-  try {
-    if (!req.file) return res.status(400).json({ error: "no_file" });
-
-    // аккуратное имя
-    const safeBase =
-      (req.file.originalname || "image.jpg")
-        .replace(/[^a-z0-9_.-]/gi, "_")
-        .toLowerCase() || "image.jpg";
-
-    const name = `${Date.now()}_${safeBase}`;
-    const filepath = path.join(UPLOAD_DIR, name);
-    fs.writeFileSync(filepath, req.file.buffer);
-
-    const origin =
-      process.env.PUBLIC_ORIGIN || `${req.protocol}://${req.get("host")}`;
-    const url = `${origin}/uploads/${name}`;
-
-    return res.json({ url });
-  } catch (e) {
-    console.error("UPLOAD_ERROR:", e);
-    return res.status(500).json({ error: "upload_failed" });
-  }
-});
-
-// ---- Твои остальные API-роуты (Replicate/OpenAI) ниже
-====================== */
+/* ====================== UTILITIES ====================== */
 const sleep = (ms) => new Promise((r) => setTimeout(r, ms));
 
 async function fetchJson(url, opts = {}) {
@@ -212,6 +162,50 @@ app.get("/env-check", (_, res) => {
   });
 });
 
+/* ====================== [ADDED] STATIC & UPLOADS ====================== */
+// Папки статики
+const PUBLIC_DIR = path.join(__dirname, "public");
+const UPLOAD_DIR = path.join(PUBLIC_DIR, "uploads");
+fs.mkdirSync(UPLOAD_DIR, { recursive: true });
+
+// Раздача /uploads с CORS и кэшированием
+app.use(
+  "/uploads",
+  express.static(UPLOAD_DIR, {
+    setHeaders: (res) => {
+      res.setHeader("Access-Control-Allow-Origin", "*");
+      res.setHeader("Cache-Control", "public, max-age=31536000, immutable");
+    },
+  })
+);
+
+// (не обязательно) раздача остальной статики из /public — оставил выключенной,
+// чтобы не менять поведение сайта. Раскомментируй при необходимости.
+// app.use(express.static(PUBLIC_DIR));
+
+// Эндпоинт аплоада — принимает form-data field "file", возвращает абсолютный URL
+const upload = multer({ storage: multer.memoryStorage(), limits: { fileSize: 15 * 1024 * 1024 } });
+
+app.post("/api/upload", upload.single("file"), async (req, res) => {
+  try {
+    if (!req.file) return res.status(400).json({ error: "no_file" });
+
+    const safeBase =
+      (req.file.originalname || "image.jpg").replace(/[^a-z0-9_.-]/gi, "_").toLowerCase() || "image.jpg";
+    const name = `${Date.now()}_${safeBase}`;
+    const filepath = path.join(UPLOAD_DIR, name);
+    fs.writeFileSync(filepath, req.file.buffer);
+
+    const origin = process.env.PUBLIC_ORIGIN || `${req.protocol}://${req.get("host")}`;
+    const url = `${origin}/uploads/${name}`;
+
+    return res.json({ url });
+  } catch (e) {
+    console.error("UPLOAD_ERROR:", e);
+    return res.status(500).json({ error: "upload_failed" });
+  }
+});
+
 /* ====================== SMART ROOT DISPATCH ====================== */
 app.post("/", (req, res) => {
   const body = readBody(req.body);
@@ -313,7 +307,7 @@ Return STRICT JSON:
         }
         gptUsed = true;
       } catch (e) {
-        caption = `✨ ${idea}\n🚀 Learn more and take action today.\n\n➡️ Learn more\n\nhttps://hi-ai.ai #ai #automation #creativity`.slice(0, maxChars);
+        caption = `✨ ${idea}\n Learn more and take action today.\n\n➡️ Learn more\n\nhttps://hi-ai.ai #ai #automation #creativity`.slice(0, maxChars);
         vprompt = `${idea}. Modern minimalist beige & orange, warm light, clean bg, no text. AR ${ratio}.`;
       }
     } else {
@@ -353,7 +347,7 @@ Return STRICT JSON:
           const job = await replicatePredict(process.env.REPLICATE_MODEL_VERSION_SDXL, {
             prompt: vprompt,
             negative_prompt: negative,
-            width: [896,1600,1280,720,1024,1024] && undefined, // width/height задаём ниже в ветке ratio при необходимости
+            width: [896,1600,1280,720,1024,1024] && undefined,
             height: undefined,
             num_inference_steps: 30,
             guidance_scale: 7.0,
@@ -451,7 +445,7 @@ app.post("/api/image-studio", async (req, res) => {
     const strength = body.strength ?? DEFAULT_STRENGTH;
     const seed = body.seed ?? null;
     const seed_lock = !!body.seed_lock;
-    const camera_path = String(body.camera_path || "none").toLowerCase(); // 'none'|'orbit'
+    const camera_path = String(body.camera_path || "none").toLowerCase();
 
     let image_data = body.image_data || null;
     let mask_data = body.mask_data || null;
@@ -537,7 +531,7 @@ app.post("/api/image-studio", async (req, res) => {
         for (const m of MODELS) {
           try {
             const inputX = m.makeInput({ image_data, prompt: promptRaw || "" });
-            const pred = await replicateCreateBySlug(m.slug, inputX); // slug endpoint
+            const pred = await replicateCreateBySlug(m.slug, inputX);
             const image_url = await waitPrediction(pred.id, m.slug, body.max_wait_ms);
             return { image_url, model: m.slug, tried };
           } catch (e) {
@@ -831,7 +825,9 @@ app.post("/api/video-reels", async (req, res) => {
     if (!image_only) {
       const openai = new OpenAI({ apiKey: process.env.OPENAI_API_KEY });
       try {
-        const user = `
+        const resp = await openai.chat.completions.create({
+          model: "gpt-4o-mini",
+          messages: [{ role: "user", content: `
 Write a short social caption AND a clean visual prompt.
 
 Constraints:
@@ -852,11 +848,7 @@ Return JSON:
 {
   "caption": "...",
   "visual_prompt": "..."
-}`.trim();
-
-        const resp = await openai.chat.completions.create({
-          model: "gpt-4o-mini",
-          messages: [{ role: "user", content: user }],
+}`.trim() }],
           temperature: 0.9,
           max_tokens: 500,
         });
@@ -865,7 +857,7 @@ Return JSON:
         const j = JSON.parse(s >= 0 && e >= 0 ? text.slice(s, e + 1) : "{}");
         caption = (j.caption || "").toString().trim();
         vprompt = (j.visual_prompt || "").toString().trim();
-        if (!caption) caption = `✨ ${idea}\n🚀 Learn more and take action today.\n\n➡️ Learn more\n\nhttps://hi-ai.ai #ai #automation #creativity`.slice(0, maxChars);
+        if (!caption) caption = `✨ ${idea}\n Learn more and take action today.\n\n➡️ Learn more\n\nhttps://hi-ai.ai #ai #automation #creativity`.slice(0, maxChars);
         if (!vprompt) vprompt = `${idea}. Clean. AR ${ratio}.`;
         if (caption.length > Math.round(maxChars * 1.1)) {
           const cut = caption.slice(0, Math.round(maxChars * 1.1));
@@ -874,33 +866,22 @@ Return JSON:
         }
         gptUsed = true;
       } catch {
-        caption = `✨ ${idea}\n🚀 Learn more and take action today.\n\n➡️ Learn more\n\nhttps://hi-ai.ai #ai #automation #creativity`.slice(0, maxChars);
+        caption = `✨ ${idea}\n Learn more and take action today.\n\n➡️ Learn more\n\nhttps://hi-ai.ai #ai #automation #creativity`.slice(0, maxChars);
         vprompt = `${idea}. Clean. AR ${ratio}.`;
       }
     }
 
     // --- Визуал ---
-    // 1) Только текст
     if (text_only) {
-      return res.json({
-        ok: true,
-        caption,
-        vprompt,
-        video_url: null,
-        image_url: null,
-        gpt_used: !!gptUsed,
-        ratio,
-        seconds: wanSeconds,
-        size_used: wanSize,
-        mode: "text_only",
+      return res.status(200).json({
+        ok: true, caption, vprompt, video_url: null, image_url: null, gpt_used: !!gptUsed,
+        ratio, seconds: wanSeconds, size_used: wanSize, mode: "text_only",
       });
     }
 
-    // 2) Форс-видео: без fallback-а в картинку
     if (force_video) {
       let video_url = null;
 
-      // a) пробуем по slug
       if (videoSlug) {
         try {
           const job = await replicateCreateBySlug(videoSlug, {
@@ -916,7 +897,6 @@ Return JSON:
         } catch {}
       }
 
-      // b) пробуем по version id
       if (!video_url && process.env.REPLICATE_MODEL_VERSION_VIDEO) {
         try {
           const job = await replicatePredict(process.env.REPLICATE_MODEL_VERSION_VIDEO, {
@@ -932,33 +912,24 @@ Return JSON:
       }
 
       if (!video_url) {
-        return res.status(502).json({
-          ok: false,
-          error: "Video generation failed (forced). Check model slug/version logs.",
-        });
+        return res.status(502).json({ ok: false, error: "Video generation failed (forced). Check model slug/version logs." });
       }
 
-      return res.json({
-        ok: true,
-        caption: null, // хочешь — верни caption
-        vprompt,
-        video_url,
-        image_url: null,
-        gpt_used: !!gptUsed,
-        ratio,
-        seconds: wanSeconds,
-        size_used: wanSize,
-        mode: "video",
+      return res.status(200).json({
+        ok: true, caption: null, vprompt, video_url, image_url: null, gpt_used: !!gptUsed,
+        ratio, seconds: wanSeconds, size_used: wanSize, mode: "video",
       });
     }
 
-    // 3) Только картинка (явно)
     if (image_only && opts.image !== false) {
       let image_url = null;
-      const versionImg = imageModelKey === "flux" ? process.env.REPLICATE_MODEL_VERSION_FLUX : process.env.REPLICATE_MODEL_VERSION_SDXL;
+      const versionImg = chooseImageModelKey({ idea, style, hint: imageHint }) === "flux"
+        ? process.env.REPLICATE_MODEL_VERSION_FLUX
+        : process.env.REPLICATE_MODEL_VERSION_SDXL;
+
       if (versionImg) {
         const inputI =
-          imageModelKey === "flux"
+          chooseImageModelKey({ idea, style, hint: imageHint }) === "flux"
             ? { prompt: vprompt, go_fast: false, megapixels: "1", num_outputs: 1, output_format: "png", output_quality: 90 }
             : { prompt: vprompt, width: w, height: h, num_inference_steps: 30, guidance_scale: 7.0, num_outputs: 1 };
         try {
@@ -968,24 +939,14 @@ Return JSON:
         } catch {}
       }
 
-      return res.json({
-        ok: true,
-        caption,
-        vprompt,
-        video_url: null,
-        image_url: image_url || null,
-        gpt_used: !!gptUsed,
-        ratio,
-        seconds: wanSeconds,
-        size_used: wanSize,
-        mode: "image_only",
+      return res.status(200).json({
+        ok: true, caption, vprompt, video_url: null, image_url: image_url || null, gpt_used: !!gptUsed,
+        ratio, seconds: wanSeconds, size_used: wanSize, mode: "image_only",
       });
     }
 
-    // 4) Стандартный “full” (может упасть в картинку, НО только если не форсили видео)
     let video_url = null, image_url = null;
 
-    // сначала slug
     if (videoSlug) {
       try {
         const job = await replicateCreateBySlug(videoSlug, {
@@ -1001,7 +962,6 @@ Return JSON:
       } catch {}
     }
 
-    // потом version id
     if (!video_url && process.env.REPLICATE_MODEL_VERSION_VIDEO) {
       try {
         const job = await replicatePredict(process.env.REPLICATE_MODEL_VERSION_VIDEO, {
@@ -1016,12 +976,14 @@ Return JSON:
       } catch {}
     }
 
-    // если видео не получилось И НЕ форсили — делаем картинку, если разрешено
     if (!video_url && opts.image !== false) {
-      const versionImg = imageModelKey === "flux" ? process.env.REPLICATE_MODEL_VERSION_FLUX : process.env.REPLICATE_MODEL_VERSION_SDXL;
+      const versionImg = chooseImageModelKey({ idea, style, hint: imageHint }) === "flux"
+        ? process.env.REPLICATE_MODEL_VERSION_FLUX
+        : process.env.REPLICATE_MODEL_VERSION_SDXL;
+
       if (versionImg) {
         const inputI =
-          imageModelKey === "flux"
+          chooseImageModelKey({ idea, style, hint: imageHint }) === "flux"
             ? { prompt: vprompt, go_fast: false, megapixels: "1", num_outputs: 1, output_format: "png", output_quality: 90 }
             : { prompt: vprompt, width: w, height: h, num_inference_steps: 30, guidance_scale: 7.0, num_outputs: 1 };
         try {
@@ -1032,20 +994,11 @@ Return JSON:
       }
     }
 
-    return res.json({
-      ok: true,
-      caption,
-      vprompt,
-      video_url: video_url || null,
-      image_url: image_url || null,
-      gpt_used: !!gptUsed,
-      ratio,
-      seconds: wanSeconds,
-      size_used: wanSize,
-      mode: video_url ? "video" : image_url ? "image_fallback" : "text_only",
+    return res.status(200).json({
+      ok: true, caption, vprompt, video_url: video_url || null, image_url: image_url || null, gpt_used: !!gptUsed,
+      ratio, seconds: wanSeconds, size_used: wanSize, mode: video_url ? "video" : image_url ? "image_fallback" : "text_only",
     });
   } catch (e) {
-    // важно: 500, чтобы фронт увидел ошибку, а не "ok:true"
     res.status(500).json({ ok: false, error: String(e.message || e) });
   }
 });
@@ -1053,7 +1006,3 @@ Return JSON:
 /* ====================== START ====================== */
 const port = process.env.PORT || 8080;
 app.listen(port, () => console.log(`HI-AI backend on :${port}`));
-
-
-
-
