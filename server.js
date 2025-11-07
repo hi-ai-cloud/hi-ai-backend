@@ -1,18 +1,78 @@
 // server.js
-// HI-AI HUB — Unified Backend (Brand Post + Image Studio + Video Studio + Video Reels)
-// Express + OpenAI + Replicate (polling, data:URL safe, model routing fixed for Replicate 2025)
+// HI-AI HUB — Unified Backend (Brand Post + Image/Video Studio)
+// ESM (Node 18+), Express + CORS + Uploads
 
 import express from "express";
 import cors from "cors";
-import fetch from "node-fetch";
+import fetch from "node-fetch"; // если используешь где-то ещё
 import OpenAI from "openai";
 import "dotenv/config";
 
+import multer from "multer";
+import path from "path";
+import fs from "fs";
+import { fileURLToPath } from "url";
+
+const __filename = fileURLToPath(import.meta.url);
+const __dirname  = path.dirname(__filename);
+
 const app = express();
+
+// --- Core middlewares
 app.use(cors());
 app.use(express.json({ limit: "30mb" }));
+app.use(express.urlencoded({ extended: true, limit: "30mb" }));
 
-/* ====================== UTILITIES ====================== */
+// --- Static /public and /uploads
+const PUBLIC_DIR  = path.join(__dirname, "public");
+const UPLOAD_DIR  = path.join(PUBLIC_DIR, "uploads");
+fs.mkdirSync(UPLOAD_DIR, { recursive: true });
+
+// Отдача статики (в т.ч. /uploads/*)
+app.use(
+  "/uploads",
+  express.static(UPLOAD_DIR, {
+    setHeaders: (res) => {
+      res.setHeader("Access-Control-Allow-Origin", "*"); // для <img crossOrigin="anonymous">
+      res.setHeader("Cache-Control", "public, max-age=31536000, immutable");
+    },
+  })
+);
+app.use(express.static(PUBLIC_DIR)); // если нужны и другие статики из /public
+
+// --- File upload: /api/upload
+const upload = multer({
+  storage: multer.memoryStorage(),
+  limits: { fileSize: 15 * 1024 * 1024 }, // 15MB
+});
+
+app.post("/api/upload", upload.single("file"), async (req, res) => {
+  try {
+    if (!req.file) return res.status(400).json({ error: "no_file" });
+
+    // аккуратное имя
+    const safeBase =
+      (req.file.originalname || "image.jpg")
+        .replace(/[^a-z0-9_.-]/gi, "_")
+        .toLowerCase() || "image.jpg";
+
+    const name = `${Date.now()}_${safeBase}`;
+    const filepath = path.join(UPLOAD_DIR, name);
+    fs.writeFileSync(filepath, req.file.buffer);
+
+    const origin =
+      process.env.PUBLIC_ORIGIN || `${req.protocol}://${req.get("host")}`;
+    const url = `${origin}/uploads/${name}`;
+
+    return res.json({ url });
+  } catch (e) {
+    console.error("UPLOAD_ERROR:", e);
+    return res.status(500).json({ error: "upload_failed" });
+  }
+});
+
+// ---- Твои остальные API-роуты (Replicate/OpenAI) ниже
+====================== */
 const sleep = (ms) => new Promise((r) => setTimeout(r, ms));
 
 async function fetchJson(url, opts = {}) {
@@ -993,6 +1053,7 @@ Return JSON:
 /* ====================== START ====================== */
 const port = process.env.PORT || 8080;
 app.listen(port, () => console.log(`HI-AI backend on :${port}`));
+
 
 
 
