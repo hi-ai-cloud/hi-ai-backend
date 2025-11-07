@@ -8,19 +8,62 @@ import fetch from "node-fetch";
 import OpenAI from "openai";
 import "dotenv/config";
 
-// [ADDED] — минимальные импорты для аплоада и статики
+// --- NEW: upload deps
 import multer from "multer";
 import path from "path";
 import fs from "fs";
-import { fileURLToPath } from "url"; // для __dirname в ESM
-
-// [ADDED] — безопасный __dirname для ESM
-const __filename = fileURLToPath(import.meta.url);
-const __dirname  = path.dirname(__filename);
 
 const app = express();
+app.set("trust proxy", true); // корректный proto/host за CDN/прокси
 app.use(cors());
 app.use(express.json({ limit: "30mb" }));
+
+/* ====================== UPLOADS (NEW) ====================== */
+
+// папка для файлов
+const UPLOAD_DIR = path.join(process.cwd(), "public", "uploads");
+fs.mkdirSync(UPLOAD_DIR, { recursive: true });
+
+// раздача статики /uploads
+app.use(
+  "/uploads",
+  express.static(UPLOAD_DIR, {
+    setHeaders: (res) => {
+      res.setHeader("Access-Control-Allow-Origin", "*");
+      res.setHeader("Cache-Control", "public, max-age=31536000, immutable");
+    },
+  })
+);
+
+const upload = multer({ storage: multer.memoryStorage() });
+
+// построение абсолютного URL
+function absoluteOrigin(req) {
+  if (process.env.PUBLIC_ORIGIN) return process.env.PUBLIC_ORIGIN.replace(/\/+$/, "");
+  const proto = (req.headers["x-forwarded-proto"] || req.protocol || "https").split(",")[0].trim();
+  const host = req.headers["x-forwarded-host"] || req.headers.host;
+  return `${proto}://${host}`;
+}
+function absUrl(req, p) {
+  const base = absoluteOrigin(req);
+  return `${base}${p.startsWith("/") ? "" : "/"}${p}`;
+}
+
+// загрузка файла
+app.post("/api/upload", upload.single("file"), async (req, res) => {
+  try {
+    if (!req.file) return res.status(400).json({ error: "no_file" });
+    const safeName = (req.file.originalname || "image.jpg").replace(/\s+/g, "_");
+    const name = `${Date.now()}_${safeName}`;
+    const filepath = path.join(UPLOAD_DIR, name);
+    fs.writeFileSync(filepath, req.file.buffer);
+    const publicPath = `/uploads/${name}`;
+    return res.json({ url: absUrl(req, publicPath) });
+  } catch (e) {
+    console.error(e);
+    return res.status(500).json({ error: "upload_failed" });
+  }
+});
 
 /* ====================== UTILITIES ====================== */
 const sleep = (ms) => new Promise((r) => setTimeout(r, ms));
@@ -105,7 +148,7 @@ async function replicateCreateBySlug(slug, input) {
   });
 }
 
-// ✅ безопасный вывод ошибки, без вложенных {}
+// безопасный поллинг
 async function pollPredictionByUrl(getUrl, { tries = 240, delayMs = 1500 } = {}) {
   let last = null;
   for (let i = 0; i < tries; i++) {
@@ -159,51 +202,8 @@ app.get("/env-check", (_, res) => {
     REPLICATE_MODEL_VERSION_FLUX: !!process.env.REPLICATE_MODEL_VERSION_FLUX,
     REPLICATE_MODEL_VERSION_VIDEO: !!process.env.REPLICATE_MODEL_VERSION_VIDEO,
     REPLICATE_MODEL_VERSION_I2V: !!process.env.REPLICATE_MODEL_VERSION_I2V,
+    PUBLIC_ORIGIN: process.env.PUBLIC_ORIGIN || null,
   });
-});
-
-/* ====================== [ADDED] STATIC & UPLOADS ====================== */
-// Папки статики
-const PUBLIC_DIR = path.join(__dirname, "public");
-const UPLOAD_DIR = path.join(PUBLIC_DIR, "uploads");
-fs.mkdirSync(UPLOAD_DIR, { recursive: true });
-
-// Раздача /uploads с CORS и кэшированием
-app.use(
-  "/uploads",
-  express.static(UPLOAD_DIR, {
-    setHeaders: (res) => {
-      res.setHeader("Access-Control-Allow-Origin", "*");
-      res.setHeader("Cache-Control", "public, max-age=31536000, immutable");
-    },
-  })
-);
-
-// (не обязательно) раздача остальной статики из /public — оставил выключенной,
-// чтобы не менять поведение сайта. Раскомментируй при необходимости.
-// app.use(express.static(PUBLIC_DIR));
-
-// Эндпоинт аплоада — принимает form-data field "file", возвращает абсолютный URL
-const upload = multer({ storage: multer.memoryStorage(), limits: { fileSize: 15 * 1024 * 1024 } });
-
-app.post("/api/upload", upload.single("file"), async (req, res) => {
-  try {
-    if (!req.file) return res.status(400).json({ error: "no_file" });
-
-    const safeBase =
-      (req.file.originalname || "image.jpg").replace(/[^a-z0-9_.-]/gi, "_").toLowerCase() || "image.jpg";
-    const name = `${Date.now()}_${safeBase}`;
-    const filepath = path.join(UPLOAD_DIR, name);
-    fs.writeFileSync(filepath, req.file.buffer);
-
-    const origin = process.env.PUBLIC_ORIGIN || `${req.protocol}://${req.get("host")}`;
-    const url = `${origin}/uploads/${name}`;
-
-    return res.json({ url });
-  } catch (e) {
-    console.error("UPLOAD_ERROR:", e);
-    return res.status(500).json({ error: "upload_failed" });
-  }
 });
 
 /* ====================== SMART ROOT DISPATCH ====================== */
@@ -445,7 +445,7 @@ app.post("/api/image-studio", async (req, res) => {
     const strength = body.strength ?? DEFAULT_STRENGTH;
     const seed = body.seed ?? null;
     const seed_lock = !!body.seed_lock;
-    const camera_path = String(body.camera_path || "none").toLowerCase();
+    const camera_path = String(body.camera_path || "none").toLowerCase(); // 'none'|'orbit'
 
     let image_data = body.image_data || null;
     let mask_data = body.mask_data || null;
@@ -825,9 +825,7 @@ app.post("/api/video-reels", async (req, res) => {
     if (!image_only) {
       const openai = new OpenAI({ apiKey: process.env.OPENAI_API_KEY });
       try {
-        const resp = await openai.chat.completions.create({
-          model: "gpt-4o-mini",
-          messages: [{ role: "user", content: `
+        const user = `
 Write a short social caption AND a clean visual prompt.
 
 Constraints:
@@ -848,7 +846,11 @@ Return JSON:
 {
   "caption": "...",
   "visual_prompt": "..."
-}`.trim() }],
+}`.trim();
+
+        const resp = await openai.chat.completions.create({
+          model: "gpt-4o-mini",
+          messages: [{ role: "user", content: user }],
           temperature: 0.9,
           max_tokens: 500,
         });
@@ -873,9 +875,17 @@ Return JSON:
 
     // --- Визуал ---
     if (text_only) {
-      return res.status(200).json({
-        ok: true, caption, vprompt, video_url: null, image_url: null, gpt_used: !!gptUsed,
-        ratio, seconds: wanSeconds, size_used: wanSize, mode: "text_only",
+      return res.json({
+        ok: true,
+        caption,
+        vprompt,
+        video_url: null,
+        image_url: null,
+        gpt_used: !!gptUsed,
+        ratio,
+        seconds: wanSeconds,
+        size_used: wanSize,
+        mode: "text_only",
       });
     }
 
@@ -912,24 +922,32 @@ Return JSON:
       }
 
       if (!video_url) {
-        return res.status(502).json({ ok: false, error: "Video generation failed (forced). Check model slug/version logs." });
+        return res.status(502).json({
+          ok: false,
+          error: "Video generation failed (forced). Check model slug/version logs.",
+        });
       }
 
-      return res.status(200).json({
-        ok: true, caption: null, vprompt, video_url, image_url: null, gpt_used: !!gptUsed,
-        ratio, seconds: wanSeconds, size_used: wanSize, mode: "video",
+      return res.json({
+        ok: true,
+        caption: null,
+        vprompt,
+        video_url,
+        image_url: null,
+        gpt_used: !!gptUsed,
+        ratio,
+        seconds: wanSeconds,
+        size_used: wanSize,
+        mode: "video",
       });
     }
 
     if (image_only && opts.image !== false) {
       let image_url = null;
-      const versionImg = chooseImageModelKey({ idea, style, hint: imageHint }) === "flux"
-        ? process.env.REPLICATE_MODEL_VERSION_FLUX
-        : process.env.REPLICATE_MODEL_VERSION_SDXL;
-
+      const versionImg = imageModelKey === "flux" ? process.env.REPLICATE_MODEL_VERSION_FLUX : process.env.REPLICATE_MODEL_VERSION_SDXL;
       if (versionImg) {
         const inputI =
-          chooseImageModelKey({ idea, style, hint: imageHint }) === "flux"
+          imageModelKey === "flux"
             ? { prompt: vprompt, go_fast: false, megapixels: "1", num_outputs: 1, output_format: "png", output_quality: 90 }
             : { prompt: vprompt, width: w, height: h, num_inference_steps: 30, guidance_scale: 7.0, num_outputs: 1 };
         try {
@@ -939,9 +957,17 @@ Return JSON:
         } catch {}
       }
 
-      return res.status(200).json({
-        ok: true, caption, vprompt, video_url: null, image_url: image_url || null, gpt_used: !!gptUsed,
-        ratio, seconds: wanSeconds, size_used: wanSize, mode: "image_only",
+      return res.json({
+        ok: true,
+        caption,
+        vprompt,
+        video_url: null,
+        image_url: image_url || null,
+        gpt_used: !!gptUsed,
+        ratio,
+        seconds: wanSeconds,
+        size_used: wanSize,
+        mode: "image_only",
       });
     }
 
@@ -977,13 +1003,10 @@ Return JSON:
     }
 
     if (!video_url && opts.image !== false) {
-      const versionImg = chooseImageModelKey({ idea, style, hint: imageHint }) === "flux"
-        ? process.env.REPLICATE_MODEL_VERSION_FLUX
-        : process.env.REPLICATE_MODEL_VERSION_SDXL;
-
+      const versionImg = imageModelKey === "flux" ? process.env.REPLICATE_MODEL_VERSION_FLUX : process.env.REPLICATE_MODEL_VERSION_SDXL;
       if (versionImg) {
         const inputI =
-          chooseImageModelKey({ idea, style, hint: imageHint }) === "flux"
+          imageModelKey === "flux"
             ? { prompt: vprompt, go_fast: false, megapixels: "1", num_outputs: 1, output_format: "png", output_quality: 90 }
             : { prompt: vprompt, width: w, height: h, num_inference_steps: 30, guidance_scale: 7.0, num_outputs: 1 };
         try {
@@ -994,9 +1017,17 @@ Return JSON:
       }
     }
 
-    return res.status(200).json({
-      ok: true, caption, vprompt, video_url: video_url || null, image_url: image_url || null, gpt_used: !!gptUsed,
-      ratio, seconds: wanSeconds, size_used: wanSize, mode: video_url ? "video" : image_url ? "image_fallback" : "text_only",
+    return res.json({
+      ok: true,
+      caption,
+      vprompt,
+      video_url: video_url || null,
+      image_url: image_url || null,
+      gpt_used: !!gptUsed,
+      ratio,
+      seconds: wanSeconds,
+      size_used: wanSize,
+      mode: video_url ? "video" : image_url ? "image_fallback" : "text_only",
     });
   } catch (e) {
     res.status(500).json({ ok: false, error: String(e.message || e) });
