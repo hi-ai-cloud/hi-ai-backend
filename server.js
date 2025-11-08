@@ -278,7 +278,7 @@ async function pollPredictionByUrl(getUrl, { tries = 240, delayMs = 1500 } = {})
     });
     if (last.status === "succeeded") return last;
     if (last.status === "failed" || last.status === "canceled") {
-      throw new Error(`Replicate failed: ${last?.error || ${} || last?.logs || "unknown"}`);
+      throw new Error(`Replicate failed: ${last?.error || last?.logs || last?.status || "unknown"}`);
     }
     await sleep(delayMs);
   }
@@ -1151,3 +1151,4 @@ Return JSON:
 /* ====================== START ====================== */
 const port = process.env.PORT || 8080;
 app.listen(port, () => console.log(`HI-AI backend on :${port}`));
+
