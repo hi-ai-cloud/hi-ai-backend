@@ -118,21 +118,38 @@ app.post("/api/upload", upload.single("file"), async (req, res) => {
 });
 /* ====================== SIMPLE IMAGE PROXY (for hotlinking) ====================== */
 // GET /api/proxy?u=<absolute image url>
-// Проксирует картинку, чтобы обойти hotlink/Referer-блокировки
 app.get("/api/proxy", async (req, res) => {
   try {
-    const u = String(req.query.u || "").trim();
-    if (!/^https?:\/\//i.test(u)) return res.status(400).send("bad url");
+    const raw = String(req.query.u || "").trim();
+    if (!/^https?:\/\//i.test(raw)) return res.status(400).send("bad url");
 
-    const upstream = await fetch(u);
-    if (!upstream.ok) return res.status(upstream.status).send(`upstream ${upstream.status}`);
+    // реферер = корень домена картинки
+    const urlObj = new URL(raw);
+    const referer = urlObj.origin + "/";
+
+    const upstream = await fetch(raw, {
+      // маскируемся под обычный браузер
+      headers: {
+        "User-Agent":
+          "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/127.0.0.0 Safari/537.36",
+        "Accept":
+          "image/avif,image/webp,image/apng,image/*,*/*;q=0.8",
+        "Accept-Language": "en-US,en;q=0.9",
+        "Referer": referer
+      },
+      redirect: "follow"
+    });
+
+    if (!upstream.ok) {
+      const txt = await upstream.text().catch(()=> "");
+      return res.status(upstream.status).send(`upstream ${upstream.status}${txt ? `: ${txt}` : ""}`);
+    }
 
     const ct = upstream.headers.get("content-type") || "image/jpeg";
     res.setHeader("Access-Control-Allow-Origin", "*");
-    res.setHeader("Cache-Control", "public, max-age=86400");
+    res.setHeader("Cache-Control", "public, max-age=86400, immutable");
     res.type(ct);
 
-    // Стримим тело без буферизации
     upstream.body.pipe(res);
   } catch (e) {
     console.error("proxy failed:", e);
@@ -1084,4 +1101,5 @@ Return JSON:
 /* ====================== START ====================== */
 const port = process.env.PORT || 8080;
 app.listen(port, () => console.log(`HI-AI backend on :${port}`));
+
 
