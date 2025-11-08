@@ -8,23 +8,20 @@ import fetch from "node-fetch";
 import OpenAI from "openai";
 import "dotenv/config";
 
-// --- NEW: upload deps
+// --- upload deps
 import multer from "multer";
 import path from "path";
 import fs from "fs";
 
 const app = express();
-app.set("trust proxy", true); // корректный proto/host за CDN/прокси
+app.set("trust proxy", true);
 app.use(cors());
 app.use(express.json({ limit: "30mb" }));
 
-/* ====================== UPLOADS (NEW) ====================== */
-
-// папка для файлов
+/* ====================== STATIC UPLOADS ====================== */
 const UPLOAD_DIR = path.join(process.cwd(), "public", "uploads");
 fs.mkdirSync(UPLOAD_DIR, { recursive: true });
 
-// раздача статики /uploads
 app.use(
   "/uploads",
   express.static(UPLOAD_DIR, {
@@ -35,9 +32,7 @@ app.use(
   })
 );
 
-const upload = multer({ storage: multer.memoryStorage() });
-
-// построение абсолютного URL
+/* ====================== ORIGIN HELPERS ====================== */
 function absoluteOrigin(req) {
   if (process.env.PUBLIC_ORIGIN) return process.env.PUBLIC_ORIGIN.replace(/\/+$/, "");
   const proto = (req.headers["x-forwarded-proto"] || req.protocol || "https").split(",")[0].trim();
@@ -48,22 +43,6 @@ function absUrl(req, p) {
   const base = absoluteOrigin(req);
   return `${base}${p.startsWith("/") ? "" : "/"}${p}`;
 }
-
-// загрузка файла
-app.post("/api/upload", upload.single("file"), async (req, res) => {
-  try {
-    if (!req.file) return res.status(400).json({ error: "no_file" });
-    const safeName = (req.file.originalname || "image.jpg").replace(/\s+/g, "_");
-    const name = `${Date.now()}_${safeName}`;
-    const filepath = path.join(UPLOAD_DIR, name);
-    fs.writeFileSync(filepath, req.file.buffer);
-    const publicPath = `/uploads/${name}`;
-    return res.json({ url: absUrl(req, publicPath) });
-  } catch (e) {
-    console.error(e);
-    return res.status(500).json({ error: "upload_failed" });
-  }
-});
 
 /* ====================== UTILITIES ====================== */
 const sleep = (ms) => new Promise((r) => setTimeout(r, ms));
@@ -122,6 +101,58 @@ function makeDataUrlSafe(dataUrl) {
   return s;
 }
 
+/* ====================== UPLOAD (form-data file) ====================== */
+const upload = multer({ storage: multer.memoryStorage() });
+
+app.post("/api/upload", upload.single("file"), async (req, res) => {
+  try {
+    if (!req.file) return res.status(400).json({ error: "no_file" });
+    const safeName = (req.file.originalname || "image.jpg").replace(/\s+/g, "_");
+    const name = `${Date.now()}_${safeName}`;
+    fs.writeFileSync(path.join(UPLOAD_DIR, name), req.file.buffer);
+    return res.json({ url: absUrl(req, `/uploads/${name}`) });
+  } catch (e) {
+    console.error(e);
+    return res.status(500).json({ error: "upload_failed" });
+  }
+});
+
+/* ====================== SIMPLE GENERATE (SAVE CANVAS DATAURL) ====================== */
+// Принимает { image: "<dataURL | http(s)>" , templateId?: "..." } и сохраняет в /uploads
+app.post("/api/generate", async (req, res) => {
+  try {
+    const body = readBody(req.body);
+    const imgIn = String(body?.image || "").trim(); // data:URL или https URL
+    if (!imgIn) return res.status(400).json({ ok: false, error: "missing image" });
+
+    let buf, mime = "image/jpeg", ext = "jpg";
+
+    if (imgIn.startsWith("data:")) {
+      const m = imgIn.match(/^data:([^;]+);base64,(.+)$/);
+      if (!m) return res.status(400).json({ ok: false, error: "bad data URL" });
+      mime = m[1] || "image/jpeg";
+      buf = Buffer.from(m[2], "base64");
+      ext = (mime.split("/")[1] || "jpg").replace(/[^a-z0-9]/gi, "") || "jpg";
+    } else if (okUrl(imgIn)) {
+      const r = await fetch(imgIn);
+      if (!r.ok) return res.status(400).json({ ok: false, error: `fetch failed: ${r.status}` });
+      mime = r.headers.get("content-type") || "image/jpeg";
+      buf = Buffer.from(await r.arrayBuffer());
+      ext = mime.includes("png") ? "png" : mime.includes("webp") ? "webp" : "jpg";
+    } else {
+      return res.status(400).json({ ok: false, error: "image must be data:URL or http(s) URL" });
+    }
+
+    const safeId = String(body?.templateId || body?.template || "tpl").replace(/[^a-z0-9_-]/gi, "");
+    const name = `${Date.now()}_${safeId || "tpl"}.${ext}`;
+    fs.writeFileSync(path.join(UPLOAD_DIR, name), buf);
+    return res.json({ ok: true, url: absUrl(req, `/uploads/${name}`) });
+  } catch (e) {
+    console.error("GENERR", e);
+    return res.status(500).json({ ok: false, error: "generate_failed" });
+  }
+});
+
 /* =============== REPLICATE HELPERS (polling) =============== */
 const REPLICATE_HEADERS = () => ({
   Authorization: `Token ${process.env.REPLICATE_API_TOKEN}`,
@@ -148,14 +179,13 @@ async function replicateCreateBySlug(slug, input) {
   });
 }
 
-// безопасный поллинг
 async function pollPredictionByUrl(getUrl, { tries = 240, delayMs = 1500 } = {}) {
   let last = null;
   for (let i = 0; i < tries; i++) {
     last = await fetchJson(getUrl, { headers: { Authorization: `Token ${process.env.REPLICATE_API_TOKEN}` } });
     if (last.status === "succeeded") return last;
     if (last.status === "failed" || last.status === "canceled") {
-      throw new Error(`Replicate failed: ${last?.error || last?.status || last?.logs || "unknown"}`);
+      throw new Error(`Replicate failed: ${last?.error || ${} || last?.logs || "unknown"}`);
     }
     await sleep(delayMs);
   }
@@ -256,7 +286,6 @@ app.post("/api/brand-post", async (req, res) => {
     const wantsEmoji = !!options.emojis;
     const wantsHash = !!options.auto_hashtags;
 
-    // GPT
     const openai = new OpenAI({ apiKey: process.env.OPENAI_API_KEY });
     let caption = null, vprompt = null, gptUsed = false;
 
@@ -322,7 +351,6 @@ Return STRICT JSON:
       } No text/logos on image. Aspect ratio ${ratio}. High detail.`;
     }
 
-    // VISUAL (version → slug fallback)
     let image_url = null, modelTried = [], modelError = null;
 
     if (options.image !== false && !textOnly) {
@@ -443,9 +471,9 @@ app.post("/api/image-studio", async (req, res) => {
     const promptRaw = (body.prompt || "").trim();
     const aspect = body.aspect_ratio || DEFAULT_AR;
     const strength = body.strength ?? DEFAULT_STRENGTH;
-    const seed = body.seed ?? null;
+    the const seed = body.seed ?? null;
     const seed_lock = !!body.seed_lock;
-    const camera_path = String(body.camera_path || "none").toLowerCase(); // 'none'|'orbit'
+    const camera_path = String(body.camera_path || "none").toLowerCase();
 
     let image_data = body.image_data || null;
     let mask_data = body.mask_data || null;
@@ -497,21 +525,21 @@ app.post("/api/image-studio", async (req, res) => {
 
       if (action === "text2img") {
         if (!prompt) throw new Error("prompt is required for text2img");
-        model = "black-forest-labs/flux-schnell"; // slug
+        model = "black-forest-labs/flux-schnell";
         input = { prompt, aspect_ratio: aspect, ...(seed != null ? { seed } : {}) };
         const pred = await replicateCreateBySlug(model, input);
         const url = await waitPrediction(pred.id, model, body.max_wait_ms);
         return { image_url: url, model };
       } else if (action === "img2img") {
         if (!image_data) throw new Error("image is required for img2img");
-        model = "black-forest-labs/flux-kontext-pro"; // slug
+        model = "black-forest-labs/flux-kontext-pro";
         input = { prompt: promptRaw, input_image: image_data, image: image_data, strength, output_format: "jpg", ...(seed != null ? { seed } : {}) };
         const pred = await replicateCreateBySlug(model, input);
         const url = await waitPrediction(pred.id, model, body.max_wait_ms);
         return { image_url: url, model };
       } else if (action === "inpaint") {
         if (!image_data) throw new Error("image is required for inpaint");
-        model = "black-forest-labs/flux-kontext-pro"; // slug
+        model = "black-forest-labs/flux-kontext-pro";
         input = {
           prompt: promptRaw,
           input_image: image_data,
@@ -641,7 +669,6 @@ app.post("/api/video-studio", async (req, res) => {
 
     if (mode !== "image2video" && !idea) return res.json({ ok: false, error: "Missing 'idea' for text2video" });
 
-    // ---------- I2V: принять ВСЕ варианты источника ----------
     let incomingImage =
       (body.image_data_url && String(body.image_data_url).trim()) ||
       (body.image && String(body.image).trim()) ||
@@ -675,7 +702,7 @@ app.post("/api/video-studio", async (req, res) => {
       try {
         const job = await replicatePredict(verVideo, inputV);
         video_url = typeof job.output === "string" ? job.output : Array.isArray(job.output) ? job.output[0] : null;
-      } catch (e) { /* fallback ниже */ }
+      } catch (e) {}
 
       if (!video_url && (process.env.REPLICATE_MODEL_VERSION_SDXL || process.env.REPLICATE_MODEL_VERSION_FLUX)) {
         const useFlux = style === "cartoon3d" || style === "illustrated";
@@ -774,25 +801,21 @@ app.post("/api/video-reels", async (req, res) => {
   try {
     const body = readBody(req.body);
 
-    // --- Новые флаги из заголовков ---
     const forceVideoHeader = String(req.header("X-Force-Video") || "").trim() === "1";
     const textOnlyHeader   = String(req.header("X-Text-Only") || "").trim() === "1";
 
     const idea = (body.idea || body.prompt || "").toString().trim();
     if (!idea) return res.status(400).json({ ok: false, error: "Missing 'idea'" });
 
-    // текст/картинка/фулл
     const text_only  = textOnlyHeader || !!body.text_only || !!body.force_text_only;
     const image_only = !!body.image_only;
-    const requestedMode = String(body.mode || "").toLowerCase(); // "text2video" | "video" | "image" | ""
+    const requestedMode = String(body.mode || "").toLowerCase();
     const force_video = forceVideoHeader || requestedMode === "text2video" || requestedMode === "video" || requestedMode === "reels";
 
     const style = (body.style || "auto").toString().toLowerCase();
     const ratio = (body.ratio || "9:16").toString().replace("-", ":");
     const length = (body.length || "medium").toString().toLowerCase();
     const optsIn = typeof body.options === "object" ? body.options : { image: true };
-
-    // если форсим видео — запрещаем внутренний откат к картинке
     const opts = force_video ? { ...optsIn, image: false } : optsIn;
 
     const category = (body.category || "General").toString();
@@ -820,7 +843,6 @@ app.post("/api/video-reels", async (req, res) => {
     const wantsEmoji = !!opts.emojis;
     const wantsHash = !!opts.auto_hashtags;
 
-    // --- GPT: caption + vprompt ---
     let caption = null, vprompt = null, gptUsed = false;
     if (!image_only) {
       const openai = new OpenAI({ apiKey: process.env.OPENAI_API_KEY });
@@ -873,7 +895,6 @@ Return JSON:
       }
     }
 
-    // --- Визуал ---
     if (text_only) {
       return res.json({
         ok: true,
