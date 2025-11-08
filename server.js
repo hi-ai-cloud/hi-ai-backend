@@ -116,52 +116,99 @@ app.post("/api/upload", upload.single("file"), async (req, res) => {
     return res.status(500).json({ error: "upload_failed" });
   }
 });
-/* ====================== ROBUST IMAGE PROXY (fix 403/456) ====================== */
-// GET /api/proxy?u=<absolute image url>
+
+/* ====================== ROBUST IMAGE PROXY + GRAB ====================== */
+// helper: нормализуем origin для внешних запросов
+function publicOriginFromReq(req) {
+  return (
+    (process.env.PUBLIC_ORIGIN && process.env.PUBLIC_ORIGIN.replace(/\/+$/, "")) ||
+    ((req.headers["x-forwarded-proto"] || req.protocol || "https").toString().split(",")[0].trim() + "://" +
+     (req.headers["x-forwarded-host"] || req.headers.host))
+  );
+}
+async function fetchUpstream(raw, { origin }) {
+  // первый запрос — с "человеческими" заголовками
+  const h1 = {
+    "Referer": origin + "/",
+    "User-Agent": "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/127.0 Safari/537.36 HI-AI-Proxy/1.0",
+    "Accept": "image/avif,image/webp,image/*,*/*;q=0.8",
+    "Accept-Language": "en-US,en;q=0.9",
+    "Cache-Control": "no-cache",
+    "Pragma": "no-cache"
+  };
+  let r = await fetch(raw, { redirect: "follow", headers: h1 });
+  if (!r.ok) {
+    // ретрай "как есть"
+    const r2 = await fetch(raw, { redirect: "follow" });
+    if (r2.ok) return r2;
+    return r; // вернём ошибочный ответ — вызывающий код решит, что делать
+  }
+  return r;
+}
+
+// GET /api/proxy?u=... : прокси с авто-ре-хостом на 456/403
 app.get("/api/proxy", async (req, res) => {
   try {
     const raw = String(req.query.u || "").trim();
     if (!/^https?:\/\//i.test(raw)) return res.status(400).send("bad url");
+    const origin = publicOriginFromReq(req);
 
-    // Наш origin как корректный Referer (часто этого ждут CDN)
-    const origin =
-      (process.env.PUBLIC_ORIGIN && process.env.PUBLIC_ORIGIN.replace(/\/+$/, "")) ||
-      ((req.headers["x-forwarded-proto"] || req.protocol || "https").toString().split(",")[0].trim() + "://" +
-       (req.headers["x-forwarded-host"] || req.headers.host));
+    const upstream = await fetchUpstream(raw, { origin });
 
-    // 1-й запрос — с нормальными заголовками
-    let upstream = await fetch(raw, {
-      redirect: "follow",
-      headers: {
-        "Referer": origin + "/",
-        "User-Agent": "Mozilla/5.0 (compatible; HI-AI-Proxy/1.0; +https://hi-ai.ai)",
-        "Accept": "image/avif,image/webp,image/*,*/*;q=0.8",
-        "Accept-Language": "en-US,en;q=0.9",
-        "Cache-Control": "no-cache",
-        "Pragma": "no-cache"
+    // если CDN дал 456/403 — ре-хостим у себя и редиректим на короткий /uploads
+    if (upstream.status === 456 || upstream.status === 403) {
+      try {
+        const buf = Buffer.from(await upstream.arrayBuffer());
+        const ct = upstream.headers.get("content-type") || "image/jpeg";
+        const ext = ct.includes("png") ? "png" : ct.includes("webp") ? "webp" : "jpg";
+        const name = `${Date.now()}_grab.${ext}`;
+        fs.writeFileSync(path.join(UPLOAD_DIR, name), buf);
+        const shortUrl = absUrl(req, `/uploads/${name}`);
+        res.setHeader("Access-Control-Allow-Origin", "*");
+        return res.redirect(302, shortUrl);
+      } catch (e) {
+        return res.status(upstream.status).send(`upstream ${upstream.status}`);
       }
-    });
-
-    // Если не ок — сделаем ретрай «как есть», без Referer
-    if (!upstream.ok) {
-      const retry = await fetch(raw, { redirect: "follow" });
-      if (!retry.ok) return res.status(retry.status).send(`upstream ${retry.status}`);
-      upstream = retry;
     }
 
     const ct = upstream.headers.get("content-type") || "image/jpeg";
     res.setHeader("Access-Control-Allow-Origin", "*");
     res.setHeader("Cache-Control", "public, max-age=86400, immutable");
     res.type(ct);
-
     upstream.body.pipe(res);
   } catch (e) {
     console.error("proxy failed:", e);
     res.status(502).send("proxy failed");
   }
 });
+
+// GET /api/grab?u=... : жёсткий ре-хостинг → JSON с коротким URL
+app.get("/api/grab", async (req, res) => {
+  try {
+    const raw = String(req.query.u || "").trim();
+    if (!/^https?:\/\//i.test(raw)) return res.status(400).json({ ok: false, error: "bad url" });
+
+    const origin = publicOriginFromReq(req);
+    let r = await fetchUpstream(raw, { origin });
+
+    if (!r.ok) {
+      const text = await (async () => { try { return await r.text(); } catch { return ""; } })();
+      return res.status(400).json({ ok: false, error: `fetch failed: ${r.status}`, details: text.slice(0, 200) });
+    }
+
+    const ct = r.headers.get("content-type") || "image/jpeg";
+    const ext = ct.includes("png") ? "png" : ct.includes("webp") ? "webp" : "jpg";
+    const buf = Buffer.from(await r.arrayBuffer());
+    const name = `${Date.now()}_grab.${ext}`;
+    fs.writeFileSync(path.join(UPLOAD_DIR, name), buf);
+
+    return res.json({ ok: true, url: absUrl(req, `/uploads/${name}`) });
+  } catch (e) {
+    console.error("grab failed:", e);
+    return res.status(502).json({ ok: false, error: "grab_failed" });
+  }
+});
 /* ====================== SIMPLE GENERATE (SAVE CANVAS DATAURL) ====================== */
-// Принимает { image: "<dataURL | http(s)>" , templateId?: "..." } и сохраняет в /uploads
 app.post("/api/generate", async (req, res) => {
   try {
     const body = readBody(req.body);
@@ -231,7 +278,7 @@ async function pollPredictionByUrl(getUrl, { tries = 240, delayMs = 1500 } = {})
     });
     if (last.status === "succeeded") return last;
     if (last.status === "failed" || last.status === "canceled") {
-      throw new Error(`Replicate failed: ${last?.error || last?.status || last?.logs || "unknown"}`);
+      throw new Error(`Replicate failed: ${last?.error || ${} || last?.logs || "unknown"}`);
     }
     await sleep(delayMs);
   }
@@ -516,7 +563,8 @@ app.post("/api/image-studio", async (req, res) => {
     const action = String(actionRaw).toLowerCase();
     const promptRaw = (body.prompt || "").trim();
     const aspect = body.aspect_ratio || DEFAULT_AR;
-    const strength = body.strength ?? DEFAULT_STRENGTH;
+    the strength = body.strength ?? DEFAULT_STRENGTH; // <-- (оставь как в исходнике, тут просто контекст)
+    const strength2 = body.strength ?? DEFAULT_STRENGTH;
     const seed = body.seed ?? null;
     const seed_lock = !!body.seed_lock;
     const camera_path = String(body.camera_path || "none").toLowerCase();
@@ -624,7 +672,7 @@ app.post("/api/image-studio", async (req, res) => {
     if (batch_count === 1) {
       const anglePhrase = camera_path === "orbit" && batch_count > 1 ? orbitAngles(batch_count)[0] : angles[0] || "";
       const prompt = anglePhrase ? `${promptRaw}, ${anglePhrase}` : promptRaw;
-      const out = await runSingle({ prompt, image_data, mask_data, strength, seed });
+      const out = await runSingle({ prompt, image_data, mask_data, strength: strength2, seed });
       if (out && out.image_url) return res.json({ ok: true, success: true, mode: action, model: out.model, image_url: out.image_url });
       if (out && out.error && out.status === 502) return res.status(502).json({ ok: false, success: false, error: out.error });
       throw new Error("unexpected empty output");
@@ -638,7 +686,7 @@ app.post("/api/image-studio", async (req, res) => {
     for (let i = 0; i < count; i++) {
       const anglePhrase = seqAngles.length ? seqAngles[i % seqAngles.length] : "";
       const p = anglePhrase ? `${promptRaw}, ${anglePhrase}` : promptRaw;
-      const s = action === "img2img" || action === "inpaint" ? jitterStrength(strength) : strength;
+      const s = action === "img2img" || action === "inpaint" ? jitterStrength(strength2) : strength2;
       const useSeed = seed_lock ? baseSeed : baseSeed + i;
       tasks.push({ prompt: p, image_data, mask_data, strength: s, seed: useSeed });
     }
@@ -715,7 +763,7 @@ app.post("/api/video-studio", async (req, res) => {
 
     if (mode !== "image2video" && !idea) return res.json({ ok: false, error: "Missing 'idea' for text2video" });
 
-    // ---------- I2V: принять ВСЕ варианты источника ----------
+    // ---------- I2V ----------
     let incomingImage =
       (body.image_data_url && String(body.image_data_url).trim()) ||
       (body.image && String(body.image).trim()) ||
@@ -740,7 +788,6 @@ app.post("/api/video-studio", async (req, res) => {
     let image_url = null;
     let modeUsed = mode;
 
-    // TEXT -> VIDEO
     if (mode === "text2video") {
       const verVideo = (process.env.REPLICATE_MODEL_VERSION_VIDEO || "").trim();
       if (!verVideo) return res.json({ ok: false, error: "Set REPLICATE_MODEL_VERSION_VIDEO" });
@@ -749,7 +796,7 @@ app.post("/api/video-studio", async (req, res) => {
       try {
         const job = await replicatePredict(verVideo, inputV);
         video_url = typeof job.output === "string" ? job.output : Array.isArray(job.output) ? job.output[0] : null;
-      } catch (e) { /* fallback ниже */ }
+      } catch (e) {}
 
       if (!video_url && (process.env.REPLICATE_MODEL_VERSION_SDXL || process.env.REPLICATE_MODEL_VERSION_FLUX)) {
         const useFlux = style === "cartoon3d" || style === "illustrated";
@@ -760,14 +807,13 @@ app.post("/api/video-studio", async (req, res) => {
             : { prompt: vprompt, width: w, height: h, num_inference_steps: 30, guidance_scale: 7.0, num_outputs: 1 };
           try {
             const jobI = await replicatePredict(verStill.trim(), inputI);
-            image_url = Array.isArray(jobI.output) ? jobI.output[0] : jobI.output;
+            image_url = Array.isArray(jobI.output) ? jobI[0] : jobI.output;
             modeUsed = "image_fallback";
           } catch (e) {}
         }
       }
     }
 
-    // IMAGE -> VIDEO
     if (mode === "image2video") {
       let versionI2V = (process.env.REPLICATE_MODEL_VERSION_I2V || "").trim();
       const fallbackSlug = (process.env.REPLICATE_MODEL_SLUG_I2V_HD || "").trim();
@@ -1105,6 +1151,3 @@ Return JSON:
 /* ====================== START ====================== */
 const port = process.env.PORT || 8080;
 app.listen(port, () => console.log(`HI-AI backend on :${port}`));
-
-
-
