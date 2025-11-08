@@ -185,8 +185,7 @@ async function pollPredictionByUrl(getUrl, { tries = 240, delayMs = 1500 } = {})
     last = await fetchJson(getUrl, { headers: { Authorization: `Token ${process.env.REPLICATE_API_TOKEN}` } });
     if (last.status === "succeeded") return last;
     if (last.status === "failed" || last.status === "canceled") {
-      throw new Error(`Replicate failed: ${last?.error || ${} || last?.logs || "unknown"}`);
-    }
+      throw new Error(`Replicate failed: ${last?.error || last?.status || last?.logs || "unknown"}`);
     await sleep(delayMs);
   }
   throw new Error("Replicate timeout");
@@ -471,7 +470,7 @@ app.post("/api/image-studio", async (req, res) => {
     const promptRaw = (body.prompt || "").trim();
     const aspect = body.aspect_ratio || DEFAULT_AR;
     const strength = body.strength ?? DEFAULT_STRENGTH;
-    the const seed = body.seed ?? null;
+    const seed = body.seed ?? null;
     const seed_lock = !!body.seed_lock;
     const camera_path = String(body.camera_path || "none").toLowerCase();
 
@@ -1058,3 +1057,4 @@ Return JSON:
 /* ====================== START ====================== */
 const port = process.env.PORT || 8080;
 app.listen(port, () => console.log(`HI-AI backend on :${port}`));
+
