@@ -115,20 +115,6 @@ app.post("/api/upload", upload.single("file"), async (req, res) => {
     console.error(e);
     return res.status(500).json({ error: "upload_failed" });
   }
-  async function pollPredictionByUrl(getUrl, { tries = 240, delayMs = 1500 } = {}) {
-  let last = null;
-  for (let i = 0; i < tries; i++) {
-    last = await fetchJson(getUrl, {
-      headers: { Authorization: `Token ${process.env.REPLICATE_API_TOKEN}` }
-    });
-    if (last.status === "succeeded") return last;
-    if (last.status === "failed" || last.status === "canceled") {
-      throw new Error(`Replicate failed: ${last?.error || last?.status || last?.logs || "unknown"}`);
-    }
-    await sleep(delayMs);
-  }
-  throw new Error("Replicate timeout");
-  }
 });
 
 /* ====================== SIMPLE GENERATE (SAVE CANVAS DATAURL) ====================== */
@@ -193,7 +179,19 @@ async function replicateCreateBySlug(slug, input) {
   });
 }
 
-
+// безопасный поллинг (ВНЕ роутов, с правильными скобками)
+async function pollPredictionByUrl(getUrl, { tries = 240, delayMs = 1500 } = {}) {
+  let last = null;
+  for (let i = 0; i < tries; i++) {
+    last = await fetchJson(getUrl, {
+      headers: { Authorization: `Token ${process.env.REPLICATE_API_TOKEN}` }
+    });
+    if (last.status === "succeeded") return last;
+    if (last.status === "failed" || last.status === "canceled") {
+      throw new Error(`Replicate failed: ${last?.error || last?.status || last?.logs || "unknown"}`);
+    }
+    await sleep(delayMs);
+  }
   throw new Error("Replicate timeout");
 }
 
@@ -516,7 +514,7 @@ app.post("/api/image-studio", async (req, res) => {
           return image_url;
         }
         if (p.status === "failed" || p.status === "canceled") throw new Error(`prediction ${p.status} (${model}) ${p.error ? `: ${p.error}` : ""}`);
-        await sleep(WAIT_POLL_MS);
+        await sleep(1200);
       }
     }
     const jitterStrength = (base) => {
@@ -674,6 +672,7 @@ app.post("/api/video-studio", async (req, res) => {
 
     if (mode !== "image2video" && !idea) return res.json({ ok: false, error: "Missing 'idea' for text2video" });
 
+    // ---------- I2V: принять ВСЕ варианты источника ----------
     let incomingImage =
       (body.image_data_url && String(body.image_data_url).trim()) ||
       (body.image && String(body.image).trim()) ||
@@ -707,7 +706,7 @@ app.post("/api/video-studio", async (req, res) => {
       try {
         const job = await replicatePredict(verVideo, inputV);
         video_url = typeof job.output === "string" ? job.output : Array.isArray(job.output) ? job.output[0] : null;
-      } catch (e) {}
+      } catch (e) { /* fallback ниже */ }
 
       if (!video_url && (process.env.REPLICATE_MODEL_VERSION_SDXL || process.env.REPLICATE_MODEL_VERSION_FLUX)) {
         const useFlux = style === "cartoon3d" || style === "illustrated";
@@ -1063,5 +1062,3 @@ Return JSON:
 /* ====================== START ====================== */
 const port = process.env.PORT || 8080;
 app.listen(port, () => console.log(`HI-AI backend on :${port}`));
-
-
