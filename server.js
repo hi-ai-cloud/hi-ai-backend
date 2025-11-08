@@ -116,7 +116,29 @@ app.post("/api/upload", upload.single("file"), async (req, res) => {
     return res.status(500).json({ error: "upload_failed" });
   }
 });
+/* ====================== SIMPLE IMAGE PROXY (for hotlinking) ====================== */
+// GET /api/proxy?u=<absolute image url>
+// Проксирует картинку, чтобы обойти hotlink/Referer-блокировки
+app.get("/api/proxy", async (req, res) => {
+  try {
+    const u = String(req.query.u || "").trim();
+    if (!/^https?:\/\//i.test(u)) return res.status(400).send("bad url");
 
+    const upstream = await fetch(u);
+    if (!upstream.ok) return res.status(upstream.status).send(`upstream ${upstream.status}`);
+
+    const ct = upstream.headers.get("content-type") || "image/jpeg";
+    res.setHeader("Access-Control-Allow-Origin", "*");
+    res.setHeader("Cache-Control", "public, max-age=86400");
+    res.type(ct);
+
+    // Стримим тело без буферизации
+    upstream.body.pipe(res);
+  } catch (e) {
+    console.error("proxy failed:", e);
+    res.status(502).send("proxy failed");
+  }
+});
 /* ====================== SIMPLE GENERATE (SAVE CANVAS DATAURL) ====================== */
 // Принимает { image: "<dataURL | http(s)>" , templateId?: "..." } и сохраняет в /uploads
 app.post("/api/generate", async (req, res) => {
@@ -1062,3 +1084,4 @@ Return JSON:
 /* ====================== START ====================== */
 const port = process.env.PORT || 8080;
 app.listen(port, () => console.log(`HI-AI backend on :${port}`));
+
