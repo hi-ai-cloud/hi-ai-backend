@@ -115,6 +115,20 @@ app.post("/api/upload", upload.single("file"), async (req, res) => {
     console.error(e);
     return res.status(500).json({ error: "upload_failed" });
   }
+  async function pollPredictionByUrl(getUrl, { tries = 240, delayMs = 1500 } = {}) {
+  let last = null;
+  for (let i = 0; i < tries; i++) {
+    last = await fetchJson(getUrl, {
+      headers: { Authorization: `Token ${process.env.REPLICATE_API_TOKEN}` }
+    });
+    if (last.status === "succeeded") return last;
+    if (last.status === "failed" || last.status === "canceled") {
+      throw new Error(`Replicate failed: ${last?.error || last?.status || last?.logs || "unknown"}`);
+    }
+    await sleep(delayMs);
+  }
+  throw new Error("Replicate timeout");
+  }
 });
 
 /* ====================== SIMPLE GENERATE (SAVE CANVAS DATAURL) ====================== */
@@ -179,15 +193,7 @@ async function replicateCreateBySlug(slug, input) {
   });
 }
 
-async function pollPredictionByUrl(getUrl, { tries = 240, delayMs = 1500 } = {}) {
-  let last = null;
-  for (let i = 0; i < tries; i++) {
-    last = await fetchJson(getUrl, { headers: { Authorization: `Token ${process.env.REPLICATE_API_TOKEN}` } });
-    if (last.status === "succeeded") return last;
-    if (last.status === "failed" || last.status === "canceled") {
-      throw new Error(`Replicate failed: ${last?.error || last?.status || last?.logs || "unknown"}`);
-    await sleep(delayMs);
-  }
+
   throw new Error("Replicate timeout");
 }
 
@@ -1057,4 +1063,5 @@ Return JSON:
 /* ====================== START ====================== */
 const port = process.env.PORT || 8080;
 app.listen(port, () => console.log(`HI-AI backend on :${port}`));
+
 
