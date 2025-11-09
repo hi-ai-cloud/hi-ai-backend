@@ -21,15 +21,19 @@ app.use(express.json({ limit: "30mb" }));
 const UPLOAD_DIR = path.join(process.cwd(), "public", "uploads");  
 fs.mkdirSync(UPLOAD_DIR, { recursive: true });  
   
-app.use(  
-  "/uploads",  
+app.use(
+  "/uploads",
   express.static(UPLOAD_DIR, {  
-    setHeaders: (res) => {  
-      res.setHeader("Access-Control-Allow-Origin", "*");  
-      res.setHeader("Cache-Control", "public, max-age=31536000, immutable");  
-    },  
-  })  
-);  
+    setHeaders: (res, path) => {  
+      res.setHeader("Access-Control-Allow-Origin", "*");
+      res.setHeader("Access-Control-Allow-Methods", "GET");
+      res.setHeader("Access-Control-Allow-Headers", "Content-Type");
+      res.setHeader("Cache-Control", "public, max-age=31536000, immutable");
+      // Это важно для canvas.toDataURL + drawImage
+      res.setHeader("Cross-Origin-Resource-Policy", "cross-origin");
+    },
+  })
+);
   
 /* ====================== ORIGIN HELPERS ====================== */  
 function absoluteOrigin(req) {  
@@ -1104,3 +1108,4 @@ Return JSON:
 /* ====================== START ====================== */  
 const port = process.env.PORT || 8080;  
 app.listen(port, () => console.log(`HI-AI backend on :${port}`));  
+
