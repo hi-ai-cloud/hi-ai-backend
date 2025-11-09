@@ -27,10 +27,8 @@ app.use(
     setHeaders: (res, path) => {  
       res.setHeader("Access-Control-Allow-Origin", "*");
       res.setHeader("Access-Control-Allow-Methods", "GET");
-      res.setHeader("Access-Control-Allow-Headers", "Content-Type");
+      res.setHeader("Cross-Origin-Resource-Policy", "cross-origin"); // ЭТО САМОЕ ВАЖНОЕ
       res.setHeader("Cache-Control", "public, max-age=31536000, immutable");
-      // Это важно для canvas.toDataURL + drawImage
-      res.setHeader("Cross-Origin-Resource-Policy", "cross-origin");
     },
   })
 );
@@ -1108,4 +1106,5 @@ Return JSON:
 /* ====================== START ====================== */  
 const port = process.env.PORT || 8080;  
 app.listen(port, () => console.log(`HI-AI backend on :${port}`));  
+
 
