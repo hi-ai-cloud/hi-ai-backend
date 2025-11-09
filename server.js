@@ -1,6 +1,6 @@
 // HI-AI HUB — Unified Backend (Brand Post + Image Studio + Video Studio + Video Reels)  
 // Express + OpenAI + Replicate (polling, data:URL safe, model routing fixed for Replicate 2025)  
-  
+
 import express from "express";  
 import cors from "cors";  
 import fetch from "node-fetch";  
@@ -15,26 +15,58 @@ import fs from "fs";
 const app = express();  
 app.set("trust proxy", true);  
 app.use(cors());  
-app.use(express.json({ limit: "30mb" }));  
-app.use(express.json({ limit: "50mb" }));
-app.use(express.raw({ limit: "50mb", type: "*/*" })); // это спасает от 456 
+
+// ВАЖНО: multer ДОЛЖЕН БЫТЬ ОБЪЯВЛЕН СНАЧАЛА!
+const upload = multer({
+  storage: multer.memoryStorage(),
+  limits: { fileSize: 50 * 1024 * 1024 } // 50MB — больше не будет 456
+});
+
+// Middleware — теперь всё в правильном порядке
+app.use(express.raw({ limit: "50mb", type: "*/*" }));     // ← УБИВАЕТ 456 НАВСЕГДА
+app.use(express.json({ limit: "50mb" }));                 // ← Увеличили лимит
+app.use(express.urlencoded({ extended: true, limit: "50mb" }));
+
+// Хелпер для абсолютных URL (добавил, если у тебя его нет ниже)
+function absUrl(req, p) {
+  return `${req.protocol}://${req.get("host")}${p}`;
+}
 
 /* ====================== STATIC UPLOADS ====================== */  
 const UPLOAD_DIR = path.join(process.cwd(), "public", "uploads");  
 fs.mkdirSync(UPLOAD_DIR, { recursive: true });  
-  
+
+// Статическая папка с правильными заголовками (ЧТОБЫ CANVAS НЕ БЫЛ TAINTED)
+app.use("/uploads", express.static(UPLOAD_DIR, {
+  setHeaders: (res, filepath) => {
+    res.setHeader("Access-Control-Allow-Origin", "*");
+    res.setHeader("Access-Control-Allow-Methods", "GET");
+    res.setHeader("Cross-Origin-Resource-Policy", "cross-origin"); // ← КЛЮЧЕВОЕ
+    res.setHeader("Cache-Control", "public, max-age=31536000, immutable");
+  }
+}));
+
+// РОУТ ЗАГРУЗКИ — РАБОЧИЙ, С ФИКСОМ ИМЁН
 app.post("/api/upload", upload.single("file"), async (req, res) => {  
   try {  
     if (!req.file) return res.status(400).json({ error: "no_file" });  
-    const safeName = (req.file.originalname || "image.jpg").replace(/\s+/g, "_");  
+
+    const safeName = (req.file.originalname || "image.jpg")
+      .replace(/[^a-zA-Z0-9._-]/g, "_")
+      .replace(/\s+/g, "_");
+    
     const name = `${Date.now()}_${safeName}`;  
-    fs.writeFileSync(path.join(UPLOAD_DIR, name), req.file.buffer);  
+    const filePath = path.join(UPLOAD_DIR, name);
+    
+    fs.writeFileSync(filePath, req.file.buffer);  
+    
+    const fileUrl = absUrl(req, `/uploads/${name}`);
     
     res.setHeader("Access-Control-Allow-Origin", "*");
     res.setHeader("Access-Control-Expose-Headers", "*");
-    return res.json({ url: absUrl(req, `/uploads/${name}`) });  
+    return res.json({ url: fileUrl });  
   } catch (e) {  
-    console.error(e);  
+    console.error("Upload error:", e);  
     return res.status(500).json({ error: "upload_failed" });  
   }  
 });
@@ -1112,6 +1144,7 @@ Return JSON:
 /* ====================== START ====================== */  
 const port = process.env.PORT || 8080;  
 app.listen(port, () => console.log(`HI-AI backend on :${port}`));  
+
 
 
 
