@@ -91,6 +91,24 @@ app.post("/api/upload", upload.single("file"), async (req, res) => {
     console.error("Upload error:", e);  
     return res.status(500).json({ error: "upload_failed" });  
   }  
+// ПРОКСИ — ЭТО СЕРДЦЕ ВСЕЙ СИСТЕМЫ
+app.get("/api/proxy", async (req, res) => {
+  const { u } = req.query;
+  if (!u) return res.status(400).send("No u");
+
+  try {
+    const r = await fetch(u);
+    if (!r.ok) throw new Error("Fetch failed");
+
+    const buffer = Buffer.from(await r.arrayBuffer());
+    res.setHeader("Access-Control-Allow-Origin", "*");
+    res.setHeader("Cross-Origin-Resource-Policy", "cross-origin");
+    res.setHeader("Content-Type", r.headers.get("content-type") || "image/jpeg");
+    res.setHeader("Cache-Control", "public, max-age=31536000, immutable");
+    res.send(buffer);
+  } catch (e) {
+    res.status(502).send("Proxy error");
+  }
 });
   
 /* ====================== ORIGIN HELPERS ====================== */  
@@ -1165,6 +1183,7 @@ Return JSON:
 /* ====================== START ====================== */  
 const port = process.env.PORT || 8080;  
 app.listen(port, () => console.log(`HI-AI backend on :${port}`));  
+
 
 
 
