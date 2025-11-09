@@ -16,22 +16,28 @@ const app = express();
 app.set("trust proxy", true);  
 app.use(cors());  
 app.use(express.json({ limit: "30mb" }));  
-  
+app.use(express.json({ limit: "50mb" }));
+app.use(express.raw({ limit: "50mb", type: "*/*" })); // это спасает от 456 
+
 /* ====================== STATIC UPLOADS ====================== */  
 const UPLOAD_DIR = path.join(process.cwd(), "public", "uploads");  
 fs.mkdirSync(UPLOAD_DIR, { recursive: true });  
   
-app.use(
-  "/uploads",
-  express.static(UPLOAD_DIR, {  
-    setHeaders: (res, path) => {  
-      res.setHeader("Access-Control-Allow-Origin", "*");
-      res.setHeader("Access-Control-Allow-Methods", "GET");
-      res.setHeader("Cross-Origin-Resource-Policy", "cross-origin"); // ЭТО САМОЕ ВАЖНОЕ
-      res.setHeader("Cache-Control", "public, max-age=31536000, immutable");
-    },
-  })
-);
+app.post("/api/upload", upload.single("file"), async (req, res) => {  
+  try {  
+    if (!req.file) return res.status(400).json({ error: "no_file" });  
+    const safeName = (req.file.originalname || "image.jpg").replace(/\s+/g, "_");  
+    const name = `${Date.now()}_${safeName}`;  
+    fs.writeFileSync(path.join(UPLOAD_DIR, name), req.file.buffer);  
+    
+    res.setHeader("Access-Control-Allow-Origin", "*");
+    res.setHeader("Access-Control-Expose-Headers", "*");
+    return res.json({ url: absUrl(req, `/uploads/${name}`) });  
+  } catch (e) {  
+    console.error(e);  
+    return res.status(500).json({ error: "upload_failed" });  
+  }  
+});
   
 /* ====================== ORIGIN HELPERS ====================== */  
 function absoluteOrigin(req) {  
@@ -1106,5 +1112,6 @@ Return JSON:
 /* ====================== START ====================== */  
 const port = process.env.PORT || 8080;  
 app.listen(port, () => console.log(`HI-AI backend on :${port}`));  
+
 
 
