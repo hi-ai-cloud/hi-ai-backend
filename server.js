@@ -41,33 +41,6 @@ app.use("/uploads", express.static(UPLOAD_DIR, {
   }
 }));
 
-// РОУТ ЗАГРУЗКИ — РАБОЧИЙ НА 100%
-app.post("/api/upload", upload.single("file"), async (req, res) => {  
-  try {  
-    if (!req.file) return res.status(400).json({ error: "no_file" });  
-
-    const safeName = (req.file.originalname || "image.jpg")
-      .replace(/[^a-zA-Z0-9._-]/g, "_")
-      .replace(/\s+/g, "_");
-    
-    const name = `${Date.now()}_${safeName}`;  
-    const filePath = path.join(UPLOAD_DIR, name);
-    
-    fs.writeFileSync(filePath, req.file.buffer);  
-    
-    // ЕСЛИ absUrl УЖЕ ЕСТЬ НИЖЕ — ИСПОЛЬЗУЕМ ЕЁ, ИНАЧЕ — ЭТА
-    const fileUrl = typeof absUrl === "function" 
-      ? absUrl(req, `/uploads/${name}`)
-      : `${req.protocol}://${req.get("host")}/uploads/${name}`;
-    
-    res.setHeader("Access-Control-Allow-Origin", "*");
-    return res.json({ url: fileUrl });  
-  } catch (e) {  
-    console.error("Upload error:", e);  
-    return res.status(500).json({ error: "upload_failed" });  
-  }  
-});
-
 // РОУТ ЗАГРУЗКИ — РАБОЧИЙ, С ФИКСОМ ИМЁН
 app.post("/api/upload", upload.single("file"), async (req, res) => {  
   try {  
@@ -91,6 +64,9 @@ app.post("/api/upload", upload.single("file"), async (req, res) => {
     console.error("Upload error:", e);  
     return res.status(500).json({ error: "upload_failed" });  
   }  
+});  // ← ВОТ ЭТА СКОБКА БЫЛА ПОТЕРЯНА! ДОБАВЬ ЕЁ!
+
+/////////////////////////////////////////////////////////////////////
 // ПРОКСИ — ЭТО СЕРДЦЕ ВСЕЙ СИСТЕМЫ
 app.get("/api/proxy", async (req, res) => {
   const { u } = req.query;
@@ -107,6 +83,7 @@ app.get("/api/proxy", async (req, res) => {
     res.setHeader("Cache-Control", "public, max-age=31536000, immutable");
     res.send(buffer);
   } catch (e) {
+    console.error("Proxy error:", e);
     res.status(502).send("Proxy error");
   }
 });
@@ -1183,6 +1160,7 @@ Return JSON:
 /* ====================== START ====================== */  
 const port = process.env.PORT || 8080;  
 app.listen(port, () => console.log(`HI-AI backend on :${port}`));  
+
 
 
 
