@@ -16,35 +16,57 @@ const app = express();
 app.set("trust proxy", true);  
 app.use(cors());  
 
-// ВАЖНО: multer ДОЛЖЕН БЫТЬ ОБЪЯВЛЕН СНАЧАЛА!
+// MULTER — СНАЧАЛА!
 const upload = multer({
   storage: multer.memoryStorage(),
-  limits: { fileSize: 50 * 1024 * 1024 } // 50MB — больше не будет 456
+  limits: { fileSize: 50 * 1024 * 1024 } // 50MB
 });
 
-// Middleware — теперь всё в правильном порядке
-app.use(express.raw({ limit: "50mb", type: "*/*" }));     // ← УБИВАЕТ 456 НАВСЕГДА
-app.use(express.json({ limit: "50mb" }));                 // ← Увеличили лимит
+// Middleware — в правильном порядке
+app.use(express.raw({ limit: "50mb", type: "*/*" }));     // УБИВАЕТ 456
+app.use(express.json({ limit: "50mb" }));                 
 app.use(express.urlencoded({ extended: true, limit: "50mb" }));
 
-// Хелпер для абсолютных URL (добавил, если у тебя его нет ниже)
-function absUrl(req, p) {
-  return `${req.protocol}://${req.get("host")}${p}`;
-}
-
-/* ====================== STATIC UPLOADS ====================== */  
+// Папка uploads
 const UPLOAD_DIR = path.join(process.cwd(), "public", "uploads");  
 fs.mkdirSync(UPLOAD_DIR, { recursive: true });  
 
-// Статическая папка с правильными заголовками (ЧТОБЫ CANVAS НЕ БЫЛ TAINTED)
+// Статическая раздача с заголовками (ЧТОБЫ НЕ БЫЛО TAINTED CANVAS)
 app.use("/uploads", express.static(UPLOAD_DIR, {
-  setHeaders: (res, filepath) => {
+  setHeaders: (res) => {
     res.setHeader("Access-Control-Allow-Origin", "*");
     res.setHeader("Access-Control-Allow-Methods", "GET");
-    res.setHeader("Cross-Origin-Resource-Policy", "cross-origin"); // ← КЛЮЧЕВОЕ
+    res.setHeader("Cross-Origin-Resource-Policy", "cross-origin");
     res.setHeader("Cache-Control", "public, max-age=31536000, immutable");
   }
 }));
+
+// РОУТ ЗАГРУЗКИ — РАБОЧИЙ НА 100%
+app.post("/api/upload", upload.single("file"), async (req, res) => {  
+  try {  
+    if (!req.file) return res.status(400).json({ error: "no_file" });  
+
+    const safeName = (req.file.originalname || "image.jpg")
+      .replace(/[^a-zA-Z0-9._-]/g, "_")
+      .replace(/\s+/g, "_");
+    
+    const name = `${Date.now()}_${safeName}`;  
+    const filePath = path.join(UPLOAD_DIR, name);
+    
+    fs.writeFileSync(filePath, req.file.buffer);  
+    
+    // ЕСЛИ absUrl УЖЕ ЕСТЬ НИЖЕ — ИСПОЛЬЗУЕМ ЕЁ, ИНАЧЕ — ЭТА
+    const fileUrl = typeof absUrl === "function" 
+      ? absUrl(req, `/uploads/${name}`)
+      : `${req.protocol}://${req.get("host")}/uploads/${name}`;
+    
+    res.setHeader("Access-Control-Allow-Origin", "*");
+    return res.json({ url: fileUrl });  
+  } catch (e) {  
+    console.error("Upload error:", e);  
+    return res.status(500).json({ error: "upload_failed" });  
+  }  
+});
 
 // РОУТ ЗАГРУЗКИ — РАБОЧИЙ, С ФИКСОМ ИМЁН
 app.post("/api/upload", upload.single("file"), async (req, res) => {  
@@ -1144,6 +1166,7 @@ Return JSON:
 /* ====================== START ====================== */  
 const port = process.env.PORT || 8080;  
 app.listen(port, () => console.log(`HI-AI backend on :${port}`));  
+
 
 
 
