@@ -6,21 +6,17 @@ import cors from "cors";
 import fetch from "node-fetch";
 import OpenAI from "openai";
 import "dotenv/config";
+
+// --- system & ffmpeg
 import os from "os";
 import { execFile } from "child_process";
 import { promisify } from "util";
 import ffmpegPath from "ffmpeg-static";
 
-// --- upload deps
+// --- uploads
 import multer from "multer";
 import path from "path";
 import fs from "fs";
-
-// --- video trim deps (safe)
-import ffmpeg from "ffmpeg-static";
-import os from "os";
-import crypto from "crypto";
-import { spawn } from "child_process";
 
 const app = express();
 app.set("trust proxy", true);
@@ -41,6 +37,9 @@ app.use(
   })
 );
 
+// Single multer instance (memory)
+const upload = multer({ storage: multer.memoryStorage() /*, limits: { fileSize: 120 * 1024 * 1024 }*/ });
+
 /* ====================== ORIGIN HELPERS ====================== */
 function absoluteOrigin(req) {
   if (process.env.PUBLIC_ORIGIN) return process.env.PUBLIC_ORIGIN.replace(/\/+$/, "");
@@ -52,12 +51,15 @@ function absUrl(req, p) {
   const base = absoluteOrigin(req);
   return `${base}${p.startsWith("/") ? "" : "/"}${p}`;
 }
+
+/* ====================== FFMPEG HELPERS ====================== */
 const execFileP = promisify(execFile);
 async function runFfmpeg(args = []) {
   if (!ffmpegPath) throw new Error("ffmpeg binary not found (ffmpeg-static)");
-  const { stdout, stderr } = await execFileP(ffmpegPath, args, { maxBuffer: 1024 * 1024 * 8 });
+  const { stdout, stderr } = await execFileP(ffmpegPath, args, { maxBuffer: 8 * 1024 * 1024 });
   return { stdout, stderr };
 }
+
 /* ====================== UTILITIES ====================== */
 const sleep = (ms) => new Promise((r) => setTimeout(r, ms));
 
@@ -1281,4 +1283,5 @@ app.post("/api/video-2s", upload.single("file"), async (req, res) => {
 /* ====================== START ====================== */
 const port = process.env.PORT || 8080;
 app.listen(port, () => console.log(`HI-AI backend on :${port}`));
+
 
