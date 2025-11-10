@@ -101,10 +101,15 @@ function makeDataUrlSafe(dataUrl) {
 }
 
 /* ====================== SHORT LINKS ( /api/shorten , /t/:code ) ====================== */
+// Файл хранится на диске (не пропадёт после деплоя)
+const DATA_DIR = process.env.SHORTS_DIR || "/data";
+try { fs.mkdirSync(DATA_DIR, { recursive: true }); } catch {}
+const SHORTS_FILE = path.join(DATA_DIR, "shorts.json");
 
-// отдельное имя, чтобы не конфликтовало с любыми SHORT_DB выше
-const SHORTS_FILE = path.join(process.cwd(), "public", "shorts.json");
+// Домен для ответа (пока бэкенд — чтобы не ловить 404 на фронте)
 const SHORT_PUBLIC = (process.env.SHORT_PUBLIC || process.env.PUBLIC_ORIGIN || "").replace(/\/+$/,"");
+
+// Длина кода
 const CODE_MIN = parseInt(process.env.SHORT_MIN || "3", 10);
 const CODE_MAX = parseInt(process.env.SHORT_MAX || "6", 10);
 
@@ -113,12 +118,8 @@ function loadShortDB(){
   catch { return { map:{}, created: Date.now() }; }
 }
 function saveShortDB(db){
-  try {
-    fs.mkdirSync(path.dirname(SHORTS_FILE), { recursive: true });
-    fs.writeFileSync(SHORTS_FILE, JSON.stringify(db, null, 2));
-  } catch {}
+  try { fs.writeFileSync(SHORTS_FILE, JSON.stringify(db, null, 2)); } catch {}
 }
-
 function b62(n){
   const a="0123456789abcdefghijklmnopqrstuvwxyzABCDEFGHIJKLMNOPQRSTUVWXYZ";
   let s=""; do{ s=a[n%62]+s; n=Math.floor(n/62);}while(n>0);
@@ -131,37 +132,46 @@ function genCode(len){
   return s.slice(-L);
 }
 
+// создать/вернуть шорт
 app.post("/api/shorten", async (req, res) => {
   try {
     const body = readBody(req.body);
-    const url = String(body.url||"").trim();
+    const url  = String(body.url||"").trim();
+    let   code = (body.code||"").toString().trim();
     if(!url) return res.status(400).json({ ok:false, error:"missing url" });
-    if(!/^https?:\/\//i.test(url) && !/^data:/i.test(url)){
+    if(!/^https?:\/\//i.test(url) && !/^data:/i.test(url))
       return res.status(400).json({ ok:false, error:"bad url" });
-    }
 
     const db = loadShortDB();
 
-    // идемпотентность: возвращаем уже существующий код для того же URL
-    const existing = Object.entries(db.map).find(([,v]) => v.url === url);
-    if (existing){
-      const code = existing[0];
-      return res.json({ ok:true, short: `${SHORT_PUBLIC || absoluteOrigin(req)}/t/${code}`, code });
+    // если такой URL уже есть — отдать старый код
+    const ex = Object.entries(db.map).find(([,v]) => v.url === url);
+    if (ex) {
+      const c = ex[0];
+      return res.json({ ok:true, short:`${SHORT_PUBLIC || absoluteOrigin(req)}/t/${c}`, code:c });
     }
 
-    let code = genCode(3);
-    while(db.map[code]) code = genCode(Math.min(CODE_MAX, code.length+1));
+    // если передали желаемый code — зарезервировать его
+    if (code) {
+      code = code.replace(/[^0-9A-Za-z]/g,'').slice(0,8);
+      if (!code) return res.status(400).json({ ok:false, error:"bad code" });
+      if (db.map[code]) return res.status(409).json({ ok:false, error:"code_taken" });
+    } else {
+      code = genCode(3);
+      while (db.map[code]) code = genCode(Math.min(CODE_MAX, code.length+1));
+    }
 
     db.map[code] = { url, ts: Date.now(), hits: 0 };
     saveShortDB(db);
 
-    return res.json({ ok:true, short: `${SHORT_PUBLIC || absoluteOrigin(req)}/t/${code}`, code });
+    return res.json({ ok:true, short:`${SHORT_PUBLIC || absoluteOrigin(req)}/t/${code}`, code });
   } catch(e){
     console.error("shorten:", e);
     return res.status(500).json({ ok:false, error:"shorten_failed" });
   }
 });
 
+// инфо по коду
 app.get("/api/shorten/:code", (req,res)=>{
   const db = loadShortDB();
   const r = db.map[req.params.code];
@@ -169,6 +179,7 @@ app.get("/api/shorten/:code", (req,res)=>{
   return res.json({ ok:true, code:req.params.code, ...r });
 });
 
+// редирект
 app.get("/t/:code", (req,res)=>{
   const db = loadShortDB();
   const r = db.map[req.params.code];
@@ -1261,6 +1272,7 @@ Return JSON:
 /* ====================== START ====================== */
 const port = process.env.PORT || 8080;
 app.listen(port, () => console.log(`HI-AI backend on :${port}`));
+
 
 
 
