@@ -95,7 +95,7 @@ function makeDataUrlSafe(dataUrl) {
   const s = String(dataUrl || "").trim();
   if (!s.startsWith("data:")) return null;
   if (!/data:[^;]+;base64,/.test(s)) {
-    return `data:image/png;base64,${s.replace(/^data:[^,]+,/, "")}`;
+    return `data:image/png;base64,{${s.replace(/^data:[^,]+,/, "")}`;
   }
   return s;
 }
@@ -106,7 +106,7 @@ const DATA_DIR = process.env.SHORTS_DIR || "/data";
 try { fs.mkdirSync(DATA_DIR, { recursive: true }); } catch {}
 const SHORTS_FILE = path.join(DATA_DIR, "shorts.json");
 
-// Домен для ответа (пока бэкенд — чтобы не ловить 404 на фронте)
+// Домен для ответа (если задан SHORT_PUBLIC — он попадёт в ответах)
 const SHORT_PUBLIC = (process.env.SHORT_PUBLIC || process.env.PUBLIC_ORIGIN || "").replace(/\/+$/,"");
 
 // Длина кода
@@ -132,7 +132,7 @@ function genCode(len){
   return s.slice(-L);
 }
 
-// создать/вернуть шорт
+// POST /api/shorten  — JSON {url, code?}
 app.post("/api/shorten", async (req, res) => {
   try {
     const body = readBody(req.body);
@@ -166,12 +166,51 @@ app.post("/api/shorten", async (req, res) => {
 
     return res.json({ ok:true, short:`${SHORT_PUBLIC || absoluteOrigin(req)}/t/${code}`, code });
   } catch(e){
-    console.error("shorten:", e);
+    console.error("shorten(post):", e);
     return res.status(500).json({ ok:false, error:"shorten_failed" });
   }
 });
 
-// инфо по коду
+// GET /api/shorten?url=...&code=... — удобно вызывать с телефона
+app.get("/api/shorten", (req, res) => {
+  try {
+    const url = String(req.query.url || "").trim();
+    let code  = String(req.query.code || "").trim();
+
+    if (!url) return res.status(400).json({ ok:false, error:"missing url" });
+    if (!/^https?:\/\//i.test(url) && !/^data:/i.test(url))
+      return res.status(400).json({ ok:false, error:"bad url" });
+
+    const db = loadShortDB();
+
+    // уже существующий URL
+    const ex = Object.entries(db.map).find(([,v]) => v.url === url);
+    if (ex) {
+      const c = ex[0];
+      return res.json({ ok:true, short:`${SHORT_PUBLIC || absoluteOrigin(req)}/t/${c}`, code:c });
+    }
+
+    // желаемый код
+    if (code) {
+      code = code.replace(/[^0-9A-Za-z]/g,'').slice(0,8);
+      if (!code) return res.status(400).json({ ok:false, error:"bad code" });
+      if (db.map[code]) return res.status(409).json({ ok:false, error:"code_taken" });
+    } else {
+      code = genCode(3);
+      while (db.map[code]) code = genCode(Math.min(CODE_MAX, code.length+1));
+    }
+
+    db.map[code] = { url, ts: Date.now(), hits: 0 };
+    saveShortDB(db);
+
+    return res.json({ ok:true, short:`${SHORT_PUBLIC || absoluteOrigin(req)}/t/${code}`, code });
+  } catch(e){
+    console.error("shorten(get):", e);
+    return res.status(500).json({ ok:false, error:"shorten_failed" });
+  }
+});
+
+// Инфо по коду
 app.get("/api/shorten/:code", (req,res)=>{
   const db = loadShortDB();
   const r = db.map[req.params.code];
@@ -179,7 +218,7 @@ app.get("/api/shorten/:code", (req,res)=>{
   return res.json({ ok:true, code:req.params.code, ...r });
 });
 
-// редирект
+// Редирект
 app.get("/t/:code", (req,res)=>{
   const db = loadShortDB();
   const r = db.map[req.params.code];
@@ -212,13 +251,11 @@ app.get("/api/proxy", async (req, res) => {
     const raw = String(req.query.u || "").trim();
     if (!/^https?:\/\//i.test(raw)) return res.status(400).send("bad url");
 
-    // Наш origin как корректный Referer (часто этого ждут CDN)
     const origin =
       (process.env.PUBLIC_ORIGIN && process.env.PUBLIC_ORIGIN.replace(/\/+$/, "")) ||
       ((req.headers["x-forwarded-proto"] || req.protocol || "https").toString().split(",")[0].trim() + "://" +
        (req.headers["x-forwarded-host"] || req.headers.host));
 
-    // 1-й запрос — с нормальными заголовками
     let upstream = await fetch(raw, {
       redirect: "follow",
       headers: {
@@ -231,7 +268,6 @@ app.get("/api/proxy", async (req, res) => {
       }
     });
 
-    // Если не ок — сделаем ретрай «как есть», без Referer
     if (!upstream.ok) {
       const retry = await fetch(raw, { redirect: "follow" });
       if (!retry.ok) return res.status(retry.status).send(`upstream ${retry.status}`);
@@ -312,7 +348,6 @@ async function replicateCreateBySlug(slug, input) {
   });
 }
 
-// безопасный поллинг (ВНЕ роутов, с правильными скобками)
 async function pollPredictionByUrl(getUrl, { tries = 240, delayMs = 1500 } = {}) {
   let last = null;
   for (let i = 0; i < tries; i++) {
@@ -321,7 +356,7 @@ async function pollPredictionByUrl(getUrl, { tries = 240, delayMs = 1500 } = {})
     });
     if (last.status === "succeeded") return last;
     if (last.status === "failed" || last.status === "canceled") {
-      throw new Error(`Replicate failed: ${last?.error || last?.status || last?.logs || "unknown"}`);
+      throw new Error(`Replicate failed: ${last?.error || ${last?.status} || ${last?.logs} || "unknown"}`);
     }
     await sleep(delayMs);
   }
@@ -350,10 +385,10 @@ const MODELS = {
 
 function chooseImageModelKey({ idea, style, hint }) {
   const h = String(hint || "auto").toLowerCase();
-  if (h === "sdxl" || h === "flux") return h;
+  if (h === "sdxl" || "flux") return h;
   const st = String(style || "auto").toLowerCase();
-  if (st === "cartoon3d" || st === "illustrated") return "flux";
-  if (st === "futuristic" || st === "realistic") return "sdxl";
+  if (st === "cartoon3d" || "illustrated") return "flux";
+  if (st === "futuristic" || "realistic") return "sdxl";
   const isFun = /halloween|kids|pizza|party|fun|gymnastics/i.test(idea || "");
   return isFun ? "flux" : "sdxl";
 }
@@ -362,7 +397,7 @@ function chooseImageModelKey({ idea, style, hint }) {
 app.get("/health", (_, res) => res.json({ ok: true, ts: Date.now() }));
 app.get("/env-check", (_, res) => {
   res.json({
-    REPLICATE_API_TOKEN: !!process.env.REPLICATE_API_KEY || !!process.env.REPLICATE_API_TOKEN, // на всякий случай
+    REPLICATE_API_TOKEN: !!process.env.REPLICATE_API_KEY || !!process.env.REPLICATE_API_TOKEN,
     OPENAI_API_KEY: !!process.env.OPENAI_API_KEY,
     REPLICATE_MODEL_VERSION_SDXL: !!process.env.REPLICATE_MODEL_VERSION_SDXL,
     REPLICATE_MODEL_VERSION_FLUX: !!process.env.REPLICATE_MODEL_VERSION_FLUX,
@@ -607,7 +642,7 @@ app.post("/api/image-studio", async (req, res) => {
     const action = String(actionRaw).toLowerCase();
     const promptRaw = (body.prompt || "").trim();
     const aspect = body.aspect_ratio || DEFAULT_AR;
-    const strength = body.strength ?? DEFAULT_STRENGTH;
+    the strength = body.strength ?? DEFAULT_STRENGTH;
     const seed = body.seed ?? null;
     const seed_lock = !!body.seed_lock;
     const camera_path = String(body.camera_path || "none").toLowerCase();
@@ -1196,8 +1231,3 @@ Return JSON:
 /* ====================== START ====================== */
 const port = process.env.PORT || 8080;
 app.listen(port, () => console.log(`HI-AI backend on :${port}`));
-
-
-
-
-
