@@ -115,6 +115,48 @@ app.post("/api/upload", upload.single("file"), async (req, res) => {
     return res.status(500).json({ error: "upload_failed" });  
   }  
 });  
+/* ====================== SHORTENER ====================== */
+const SHORT_DB = path.join(UPLOAD_DIR, "short.json");
+let SHORT_MAP = {};
+try { SHORT_MAP = JSON.parse(fs.readFileSync(SHORT_DB, "utf8")); } catch {}
+
+const saveShortDb = () => {
+  try { fs.writeFileSync(SHORT_DB, JSON.stringify(SHORT_MAP, null, 0)); } catch {}
+};
+const makeSlug = (n=6) => {
+  const a = "abcdefghijklmnopqrstuvwxyzABCDEFGHIJKLMNOPQRSTUVWXYZ0123456789";
+  return Array.from({length:n}, () => a[Math.floor(Math.random()*a.length)]).join("");
+};
+
+// POST /api/shorten { url: "https://long..." } -> { ok:true, short:"https://.../s/AbC123" }
+app.post("/api/shorten", async (req, res) => {
+  try {
+    const body = readBody(req.body);
+    const long = String(body?.url || "").trim();
+    if (!okUrl(long)) return res.status(400).json({ ok:false, error:"bad url" });
+
+    // если уже есть — переиспользуем
+    for (const [k,v] of Object.entries(SHORT_MAP)) {
+      if (v === long) return res.json({ ok:true, short: absUrl(req, `/s/${k}`) });
+    }
+    let slug;
+    do { slug = makeSlug(); } while (SHORT_MAP[slug]);
+    SHORT_MAP[slug] = long;
+    saveShortDb();
+    res.json({ ok:true, short: absUrl(req, `/s/${slug}`) });
+  } catch (e) {
+    res.status(500).json({ ok:false, error:String(e.message || e) });
+  }
+});
+
+// GET /s/:slug -> 302 redirect на исходный длинный URL
+app.get("/s/:slug", (req, res) => {
+  const url = SHORT_MAP[req.params.slug];
+  if (!url) return res.status(404).send("Not found");
+  res.setHeader("Access-Control-Allow-Origin", "*");
+  res.redirect(302, url);
+});
+
 /* ====================== ROBUST IMAGE PROXY (fix 403/456) ====================== */  
 // GET /api/proxy?u=<absolute image url>  
 app.get("/api/proxy", async (req, res) => {  
@@ -1104,3 +1146,4 @@ Return JSON:
 /* ====================== START ====================== */  
 const port = process.env.PORT || 8080;  
 app.listen(port, () => console.log(`HI-AI backend on :${port}`));  
+
