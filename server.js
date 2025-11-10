@@ -1,14 +1,15 @@
-// HI-AI HUB — Unified Backend (Brand Post + Image Studio + Video Studio + Video Reels)
-// Express + OpenAI + Replicate (polling, data:URL safe, model routing fixed for Replicate 2025)
+// HI-AI HUB — Unified Backend (Brand Post + Image Studio + Video Studio + Video Reels + Shortener + 2s MP4)
+// Keep it ESM-ready for Render
 
 import express from "express";
 import cors from "cors";
 import fetch from "node-fetch";
 import OpenAI from "openai";
 import "dotenv/config";
+
 import ffmpegPath from "ffmpeg-static";
 import ffmpeg from "fluent-ffmpeg";
-ffmpeg.setFfmpegPath(ffmpegPath);
+if (ffmpegPath) ffmpeg.setFfmpegPath(ffmpegPath);
 
 // --- upload deps
 import multer from "multer";
@@ -38,7 +39,7 @@ app.use(
 /* ====================== ORIGIN HELPERS ====================== */
 function absoluteOrigin(req) {
   if (process.env.PUBLIC_ORIGIN) return process.env.PUBLIC_ORIGIN.replace(/\/+$/, "");
-  const proto = (req.headers["x-forwarded-proto"] || req.protocol || "https").split(",")[0].trim();
+  const proto = (req.headers["x-forwarded-proto"] || req.protocol || "https").toString().split(",")[0].trim();
   const host = req.headers["x-forwarded-host"] || req.headers.host;
   return `${proto}://${host}`;
 }
@@ -105,8 +106,7 @@ function makeDataUrlSafe(dataUrl) {
 }
 
 /* ====================== LOCAL SHORTENER ====================== */
-/* Хранит короткие коды в data/short.json и редиректит /s/:code на длинный URL.
-   Используй POST /api/shorten {url:"https://..."} -> {ok:true, short:"https://<host>/s/XXXXXXX"} */
+// Stores codes in data/short.json; redirect /s/:code -> long URL
 const DATA_DIR = path.join(process.cwd(), "data");
 const SHORT_DB = path.join(DATA_DIR, "short.json");
 fs.mkdirSync(DATA_DIR, { recursive: true });
@@ -165,9 +165,11 @@ app.post("/api/upload", upload.single("file"), async (req, res) => {
   }
 });
 
-// ============ MAKE 2s MP4 FROM IMAGE (Ken Burns light) ============
+/* ============ MAKE 2s MP4 FROM IMAGE (Ken Burns light) ============ */
 app.post("/api/make-video", async (req, res) => {
   try {
+    if (!ffmpegPath) return res.status(500).json({ ok:false, error:"ffmpeg binary not found" });
+
     const body = readBody(req.body);
     const imageUrl = (body.image_url || body.image || "").toString().trim();
     if (!/^https?:\/\//i.test(imageUrl)) {
@@ -181,7 +183,7 @@ app.post("/api/make-video", async (req, res) => {
                  : ratio === "4:5"  ? [1080,1350]
                  : [1080,1920]; // 9:16 по умолчанию
     const [W, H] = preset;
-    const DURATION = Math.max(1, Math.min(6, Number(body.duration_sec || 2))); // 2 сек по умолчанию
+    const DURATION = Math.max(1, Math.min(6, Number(body.duration_sec || 2))); // по умолчанию 2 сек
     const FPS = 30;
     const ZOOM = Math.max(1.0, Math.min(1.2, Number(body.zoom || 1.06)));      // лёгкий зум
 
@@ -192,7 +194,6 @@ app.post("/api/make-video", async (req, res) => {
     const outName = `wall_${Date.now()}.mp4`;
     const outPath = path.join(UPLOAD_DIR, outName);
 
-    // прокси-загрузка (чтобы обойти реферер/корс)
     const r = await fetch(imageUrl);
     if (!r.ok) {
       let t=""; try{t=await r.text()}catch{}
@@ -201,11 +202,10 @@ app.post("/api/make-video", async (req, res) => {
     const buf = Buffer.from(await r.arrayBuffer());
     fs.writeFileSync(inPath, buf);
 
-    // строим фильтры: скейл до канвы + плавный зум
-    // zoompan считает по кадрам: d = FPS * DURATION
+    // zoompan: d = FPS * DURATION (кадров)
     const totalFrames = FPS * DURATION;
-    const zoomStep = (ZOOM - 1.0) / totalFrames; // линейно к концу
-    // Каденс: сохраняем центр, формат для iOS/Android
+    const zoomStep = (ZOOM - 1.0) / totalFrames; // плавно от 1.0 до ZOOM
+
     const vf = [
       `scale=${W}:${H}:force_original_aspect_ratio=cover`,
       `zoompan=z='min(1+on*${zoomStep.toFixed(6)},${ZOOM})':d=${totalFrames}:x='iw/2-(iw/zoom/2)':y='ih/2-(ih/zoom/2)':s=${W}x${H}`,
@@ -215,7 +215,7 @@ app.post("/api/make-video", async (req, res) => {
     await new Promise((resolve, reject) => {
       ffmpeg()
         .addInput(inPath)
-        .inputOptions([ "-loop 1" ]) // зацикливаем статику
+        .inputOptions(["-loop 1"])
         .videoFilters(vf)
         .outputOptions([
           "-t", String(DURATION),
@@ -232,10 +232,8 @@ app.post("/api/make-video", async (req, res) => {
         .on("error", reject);
     });
 
-    // чистим tmp
     try { fs.unlinkSync(inPath); } catch {}
 
-    // отдаём публичный URL
     return res.json({ ok:true, url: absUrl(req, `/uploads/${outName}`) });
   } catch (e) {
     console.error("make-video failed:", e);
@@ -244,19 +242,16 @@ app.post("/api/make-video", async (req, res) => {
 });
 
 /* ====================== ROBUST IMAGE PROXY (fix 403/456) ====================== */
-// GET /api/proxy?u=<absolute image url>
 app.get("/api/proxy", async (req, res) => {
   try {
     const raw = String(req.query.u || "").trim();
     if (!/^https?:\/\//i.test(raw)) return res.status(400).send("bad url");
 
-    // Наш origin как корректный Referer (часто этого ждут CDN)
     const origin =
       (process.env.PUBLIC_ORIGIN && process.env.PUBLIC_ORIGIN.replace(/\/+$/, "")) ||
       ((req.headers["x-forwarded-proto"] || req.protocol || "https").toString().split(",")[0].trim() + "://" +
        (req.headers["x-forwarded-host"] || req.headers.host));
 
-    // 1-й запрос — с нормальными заголовками
     let upstream = await fetch(raw, {
       redirect: "follow",
       headers: {
@@ -269,7 +264,6 @@ app.get("/api/proxy", async (req, res) => {
       }
     });
 
-    // Если не ок — ретрай без Referer
     if (!upstream.ok) {
       const retry = await fetch(raw, { redirect: "follow" });
       if (!retry.ok) return res.status(retry.status).send(`upstream ${retry.status}`);
@@ -289,11 +283,10 @@ app.get("/api/proxy", async (req, res) => {
 });
 
 /* ====================== SIMPLE GENERATE (SAVE CANVAS DATAURL) ====================== */
-// Принимает { image: "<dataURL | http(s)>" , templateId?: "..." } и сохраняет в /uploads
 app.post("/api/generate", async (req, res) => {
   try {
     const body = readBody(req.body);
-    const imgIn = String(body?.image || "").trim(); // data:URL или https URL
+    const imgIn = String(body?.image || "").trim();
     if (!imgIn) return res.status(400).json({ ok: false, error: "missing image" });
 
     let buf, mime = "image/jpeg", ext = "jpg";
@@ -329,7 +322,6 @@ const REPLICATE_HEADERS = () => ({
   Authorization: `Token ${process.env.REPLICATE_API_TOKEN}`,
   "Content-Type": "application/json",
 });
-
 async function replicateCreate(version, input) {
   if (!process.env.REPLICATE_API_TOKEN) throw new Error("Missing REPLICATE_API_TOKEN");
   if (!version) throw new Error("Missing Replicate model version");
@@ -339,7 +331,6 @@ async function replicateCreate(version, input) {
     body: JSON.stringify({ version, input }),
   });
 }
-
 async function replicateCreateBySlug(slug, input) {
   if (!process.env.REPLICATE_API_TOKEN) throw new Error("Missing REPLICATE_API_TOKEN");
   if (!slug) throw new Error("Missing Replicate model slug");
@@ -349,14 +340,10 @@ async function replicateCreateBySlug(slug, input) {
     body: JSON.stringify({ input }),
   });
 }
-
-// безопасный поллинг (ВНЕ роутов, с правильными скобками)
 async function pollPredictionByUrl(getUrl, { tries = 240, delayMs = 1500 } = {}) {
   let last = null;
   for (let i = 0; i < tries; i++) {
-    last = await fetchJson(getUrl, {
-      headers: { Authorization: `Token ${process.env.REPLICATE_API_TOKEN}` }
-    });
+    last = await fetchJson(getUrl, { headers: { Authorization: `Token ${process.env.REPLICATE_API_TOKEN}` } });
     if (last.status === "succeeded") return last;
     if (last.status === "failed" || last.status === "canceled") {
       throw new Error(`Replicate failed: ${last?.error || last?.status || last?.logs || "unknown"}`);
@@ -365,7 +352,6 @@ async function pollPredictionByUrl(getUrl, { tries = 240, delayMs = 1500 } = {})
   }
   throw new Error("Replicate timeout");
 }
-
 async function replicatePredict(version, input, pollCfg) {
   const job = await replicateCreate(version, input);
   const done = await pollPredictionByUrl(job?.urls?.get, pollCfg);
@@ -378,14 +364,12 @@ const MODELS = {
   cartoon: process.env.REPLICATE_MODEL_SLUG_CARTOON,
   futuristic: process.env.REPLICATE_MODEL_SLUG_FUTURISTIC,
   i2v_hd: process.env.REPLICATE_MODEL_SLUG_I2V_HD,
-
-  sdxl: process.env.REPLICATE_MODEL_VERSION_SDXL, // version id
-  flux: process.env.REPLICATE_MODEL_VERSION_FLUX, // version id
+  sdxl: process.env.REPLICATE_MODEL_VERSION_SDXL,
+  flux: process.env.REPLICATE_MODEL_VERSION_FLUX,
   video: process.env.REPLICATE_MODEL_VERSION_VIDEO,
   i2v: process.env.REPLICATE_MODEL_VERSION_I2V,
   def: process.env.REPLICATE_MODEL_VERSION,
 };
-
 function chooseImageModelKey({ idea, style, hint }) {
   const h = String(hint || "auto").toLowerCase();
   if (h === "sdxl" || h === "flux") return h;
@@ -397,7 +381,7 @@ function chooseImageModelKey({ idea, style, hint }) {
 }
 
 /* ====================== HEALTH & ENV CHECK ====================== */
-app.get("/health", (_, res) => res.json({ ok: true, ts: Date.now() }));
+app.get("/health", (_, res) => res.json({ ok: true, ts: Date.now(), ffmpeg: !!ffmpegPath }));
 app.get("/env-check", (_, res) => {
   res.json({
     REPLICATE_API_TOKEN: !!process.env.REPLICATE_API_TOKEN,
@@ -407,6 +391,7 @@ app.get("/env-check", (_, res) => {
     REPLICATE_MODEL_VERSION_VIDEO: !!process.env.REPLICATE_MODEL_VERSION_VIDEO,
     REPLICATE_MODEL_VERSION_I2V: !!process.env.REPLICATE_MODEL_VERSION_I2V,
     PUBLIC_ORIGIN: process.env.PUBLIC_ORIGIN || null,
+    FFMPEG_STATIC: !!ffmpegPath
   });
 });
 
@@ -1118,10 +1103,7 @@ Return JSON:
       }
 
       if (!video_url) {
-        return res.status(502).json({
-          ok: false,
-          error: "Video generation failed (forced). Check model slug/version logs.",
-        });
+        return res.status(502).json({ ok: false, error: "Video generation failed (forced). Check model slug/version logs." });
       }
 
       return res.json({
@@ -1233,4 +1215,3 @@ Return JSON:
 /* ====================== START ====================== */
 const port = process.env.PORT || 8080;
 app.listen(port, () => console.log(`HI-AI backend on :${port}`));
-
