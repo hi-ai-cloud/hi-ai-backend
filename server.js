@@ -1,5 +1,5 @@
 // HI-AI HUB — Unified Backend (Brand Post + Image Studio + Video Studio + Video Reels)
-// Express + OpenAI + Replicate (polling, data:URL safe, model routing fixed for Replicate 2025)
+// Express + OpenAI + Replicate (polling, data:URL safe). Added: /api/shorten and /t/:code
 
 import express from "express";
 import cors from "cors";
@@ -11,7 +11,6 @@ import "dotenv/config";
 import multer from "multer";
 import path from "path";
 import fs from "fs";
-import crypto from "crypto";
 
 const app = express();
 app.set("trust proxy", true);
@@ -102,12 +101,12 @@ function makeDataUrlSafe(dataUrl) {
 }
 
 /* ====================== SHORT LINKS ( /api/shorten , /t/:code ) ====================== */
-// Файл хранится на диске (не пропадёт после деплоя)
-const SHORTS_DIR = process.env.SHORTS_DIR || "/data";
-try { fs.mkdirSync(SHORTS_DIR, { recursive: true }); } catch {}
-const SHORTS_FILE = path.join(SHORTS_DIR, "shorts.json");
+// Хранение в файле (Render: путь /data доступен без диска; переживает рестарт контейнера).
+const DATA_DIR = process.env.SHORTS_DIR || "/data";
+try { fs.mkdirSync(DATA_DIR, { recursive: true }); } catch {}
+const SHORTS_FILE = path.join(DATA_DIR, "shorts.json");
 
-// Домен для ответа (если не задан — берём текущий хост)
+// База домена (если задан SHORT_PUBLIC — будет он; иначе текущий бекенд)
 const SHORT_PUBLIC = (process.env.SHORT_PUBLIC || process.env.PUBLIC_ORIGIN || "").replace(/\/+$/,"");
 
 // Длина кода
@@ -133,27 +132,25 @@ function genCode(len){
   return s.slice(-L);
 }
 
+// создать/вернуть короткий урл
 app.post("/api/shorten", async (req, res) => {
   try {
     const body = readBody(req.body);
     const url  = String(body.url||"").trim();
     let   code = (body.code||"").toString().trim();
     if(!url) return res.status(400).json({ ok:false, error:"missing url" });
-
-    // Разрешаем http(s) и data:
     if(!/^https?:\/\//i.test(url) && !/^data:/i.test(url))
       return res.status(400).json({ ok:false, error:"bad url" });
 
     const db = loadShortDB();
 
-    // идемпотентность: если уже есть такой URL — вернуть старый код
+    // уже есть такой URL?
     const ex = Object.entries(db.map).find(([,v]) => v.url === url);
     if (ex) {
       const c = ex[0];
       return res.json({ ok:true, short:`${SHORT_PUBLIC || absoluteOrigin(req)}/t/${c}`, code:c });
     }
 
-    // если передали желаемый code — зарезервировать его
     if (code) {
       code = code.replace(/[^0-9A-Za-z]/g,'').slice(0,8);
       if (!code) return res.status(400).json({ ok:false, error:"bad code" });
@@ -173,6 +170,7 @@ app.post("/api/shorten", async (req, res) => {
   }
 });
 
+// инфо
 app.get("/api/shorten/:code", (req,res)=>{
   const db = loadShortDB();
   const r = db.map[req.params.code];
@@ -180,6 +178,7 @@ app.get("/api/shorten/:code", (req,res)=>{
   return res.json({ ok:true, code:req.params.code, ...r });
 });
 
+// редирект
 app.get("/t/:code", (req,res)=>{
   const db = loadShortDB();
   const r = db.map[req.params.code];
@@ -265,8 +264,7 @@ app.post("/api/generate", async (req, res) => {
       const r = await fetch(imgIn);
       if (!r.ok) return res.status(400).json({ ok: false, error: `fetch failed: ${r.status}` });
       mime = r.headers.get("content-type") || "image/jpeg";
-      const ab = await r.arrayBuffer();
-      buf = Buffer.from(ab);
+      buf = Buffer.from(await r.arrayBuffer());
       ext = mime.includes("png") ? "png" : mime.includes("webp") ? "webp" : "jpg";
     } else {
       return res.status(400).json({ ok: false, error: "image must be data:URL or http(s) URL" });
@@ -357,14 +355,14 @@ function chooseImageModelKey({ idea, style, hint }) {
 app.get("/health", (_, res) => res.json({ ok: true, ts: Date.now() }));
 app.get("/env-check", (_, res) => {
   res.json({
-    REPLICATE_API_TOKEN: !!process.env.REPLICATE_API_KEY || !!process.env.REPLICATE_API_TOKEN,
+    REPLICATE_API_TOKEN: !!process.env.REPLICATE_API_TOKEN,
     OPENAI_API_KEY: !!process.env.OPENAI_API_KEY,
     REPLICATE_MODEL_VERSION_SDXL: !!process.env.REPLICATE_MODEL_VERSION_SDXL,
     REPLICATE_MODEL_VERSION_FLUX: !!process.env.REPLICATE_MODEL_VERSION_FLUX,
     REPLICATE_MODEL_VERSION_VIDEO: !!process.env.REPLICATE_MODEL_VERSION_VIDEO,
     REPLICATE_MODEL_VERSION_I2V: !!process.env.REPLICATE_MODEL_VERSION_I2V,
     PUBLIC_ORIGIN: process.env.PUBLIC_ORIGIN || null,
-    SHORT_PUBLIC: process.env.SHORT_PUBLIC || null,
+    SHORT_PUBLIC: process.env.SHORT_PUBLIC || null
   });
 });
 
@@ -530,7 +528,7 @@ Return STRICT JSON:
         }
 
         try {
-          if (modelKey === "flux" && process.env.REPLICATE_MODEL_VERSION_FLUX) image_url = await tryFluxByVersion();
+          if (process.env.REPLICATE_MODEL_VERSION_FLUX && (style === "cartoon3d" || style === "illustrated")) image_url = await tryFluxByVersion();
           else if (process.env.REPLICATE_MODEL_VERSION_SDXL) image_url = await trySDXLByVersion();
         } catch (e) {
           modelError = String(e);
@@ -550,7 +548,7 @@ Return STRICT JSON:
       caption: textOnly || !caption ? caption || null : caption,
       vprompt,
       image_url,
-      model_used: (modelKey || "default").toUpperCase(),
+      model_used: "AUTO",
       model_tried: modelTried,
       model_error: image_url ? null : modelError || null,
       gpt_used: !!gptUsed,
@@ -565,7 +563,6 @@ Return STRICT JSON:
 /* ====================== IMAGE STUDIO ====================== */
 app.post("/api/image-studio", async (req, res) => {
   try {
-    const WAIT_POLL_MS = 1200;
     const MAX_WAIT_MS = 120000;
     const DEFAULT_AR = "1:1";
     const DEFAULT_STRENGTH = 0.6;
@@ -583,13 +580,8 @@ app.post("/api/image-studio", async (req, res) => {
       { slug: "nightmareai/real-esrgan", makeInput: ({ image_data }) => ({ image: image_data }) },
     ];
     const ANGLE_MAP = {
-      front: "front view",
-      "34left": "3/4 angle, left side",
-      "34right": "3/4 angle, right side",
-      side: "side view",
-      back: "back view",
-      top: "top-down view",
-      low: "low-angle cinematic shot",
+      front: "front view", "34left": "3/4 angle, left side", "34right": "3/4 angle, right side",
+      side: "side view", back: "back view", top: "top-down view", low: "low-angle cinematic shot",
     };
     const angleOrder = () => ["front", "34left", "side", "34right", "back", "34right", "side", "34left"];
     const orbitAngles = (count) => {
@@ -646,7 +638,6 @@ app.post("/api/image-studio", async (req, res) => {
         await sleep(1200);
       }
     }
-
     const jitterStrength = (base) => {
       const b = isFinite(base) ? Number(base) : DEFAULT_STRENGTH;
       const j = Math.random() * 0.12 - 0.06;
@@ -674,13 +665,9 @@ app.post("/api/image-studio", async (req, res) => {
         if (!image_data) throw new Error("image is required for inpaint");
         model = "black-forest-labs/flux-kontext-pro";
         input = {
-          prompt: promptRaw,
-          input_image: image_data,
-          image: image_data,
+          prompt: promptRaw, input_image: image_data, image: image_data,
           ...(mask_data ? { mask_image: mask_data, mask: mask_data } : {}),
-          strength,
-          output_format: "jpg",
-          ...(seed != null ? { seed } : {}),
+          strength, output_format: "jpg", ...(seed != null ? { seed } : {}),
         };
         const pred = await replicateCreateBySlug(model, input);
         const url = await waitPrediction(pred.id, model, body.max_wait_ms);
@@ -784,7 +771,7 @@ app.post("/api/video-studio", async (req, res) => {
     };
 
     const mode = String(body.mode || "text2video").toLowerCase();
-    const idea = String(body.idea || body.prompt || "").toString().trim();
+    const idea = String(body.idea || body.prompt || "").trim();
     const style = String(body.style || "auto").toLowerCase();
     const ratio = String(body.ratio || "9:16").replace("-", ":");
     const secs = fitDurationToWan(body.video_seconds ?? body.duration_seconds ?? 5);
@@ -802,7 +789,7 @@ app.post("/api/video-studio", async (req, res) => {
 
     if (mode !== "image2video" && !idea) return res.json({ ok: false, error: "Missing 'idea' for text2video" });
 
-    // ---------- I2V ----------
+    // ---------- I2V: источники ----------
     let incomingImage =
       (body.image_data_url && String(body.image_data_url).trim()) ||
       (body.image && String(body.image).trim()) ||
@@ -836,7 +823,7 @@ app.post("/api/video-studio", async (req, res) => {
       try {
         const job = await replicatePredict(verVideo, inputV);
         video_url = typeof job.output === "string" ? job.output : Array.isArray(job.output) ? job.output[0] : null;
-      } catch (e) { /* fallback ниже */ }
+      } catch (e) {}
 
       if (!video_url && (process.env.REPLICATE_MODEL_VERSION_SDXL || process.env.REPLICATE_MODEL_VERSION_FLUX)) {
         const useFlux = style === "cartoon3d" || style === "illustrated";
@@ -1031,16 +1018,8 @@ Return JSON:
 
     if (text_only) {
       return res.json({
-        ok: true,
-        caption,
-        vprompt,
-        video_url: null,
-        image_url: null,
-        gpt_used: !!gptUsed,
-        ratio,
-        seconds: wanSeconds,
-        size_used: wanSize,
-        mode: "text_only",
+        ok: true, caption, vprompt, video_url: null, image_url: null,
+        gpt_used: !!gptUsed, ratio, seconds: wanSeconds, size_used: wanSize, mode: "text_only",
       });
     }
 
@@ -1050,11 +1029,8 @@ Return JSON:
       if (videoSlug) {
         try {
           const job = await replicateCreateBySlug(videoSlug, {
-            prompt: vprompt,
-            size: wanSize,
-            duration: wanSeconds,
-            negative_prompt: "text, logo, watermark, letters, subtitles",
-            enable_prompt_expansion: true,
+            prompt: vprompt, size: wanSize, duration: wanSeconds,
+            negative_prompt: "text, logo, watermark, letters, subtitles", enable_prompt_expansion: true,
           });
           const done = await pollPredictionByUrl(job?.urls?.get, { tries: 240, delayMs: 1500 });
           const out = done?.output;
@@ -1065,11 +1041,8 @@ Return JSON:
       if (!video_url && process.env.REPLICATE_MODEL_VERSION_VIDEO) {
         try {
           const job = await replicatePredict(process.env.REPLICATE_MODEL_VERSION_VIDEO, {
-            prompt: vprompt,
-            size: wanSize,
-            duration: wanSeconds,
-            negative_prompt: "text, logo, watermark, letters, subtitles",
-            enable_prompt_expansion: true,
+            prompt: vprompt, size: wanSize, duration: wanSeconds,
+            negative_prompt: "text, logo, watermark, letters, subtitles", enable_prompt_expansion: true,
           });
           const out = job?.output;
           video_url = typeof out === "string" ? out : Array.isArray(out) ? out[0] : null;
@@ -1077,23 +1050,12 @@ Return JSON:
       }
 
       if (!video_url) {
-        return res.status(502).json({
-          ok: false,
-          error: "Video generation failed (forced). Check model slug/version logs.",
-        });
+        return res.status(502).json({ ok: false, error: "Video generation failed (forced). Check model slug/version logs." });
       }
 
       return res.json({
-        ok: true,
-        caption: null,
-        vprompt,
-        video_url,
-        image_url: null,
-        gpt_used: !!gptUsed,
-        ratio,
-        seconds: wanSeconds,
-        size_used: wanSize,
-        mode: "video",
+        ok: true, caption: null, vprompt, video_url, image_url: null,
+        gpt_used: !!gptUsed, ratio, seconds: wanSeconds, size_used: wanSize, mode: "video",
       });
     }
 
@@ -1113,16 +1075,8 @@ Return JSON:
       }
 
       return res.json({
-        ok: true,
-        caption,
-        vprompt,
-        video_url: null,
-        image_url: image_url || null,
-        gpt_used: !!gptUsed,
-        ratio,
-        seconds: wanSeconds,
-        size_used: wanSize,
-        mode: "image_only",
+        ok: true, caption, vprompt, video_url: null, image_url: image_url || null,
+        gpt_used: !!gptUsed, ratio, seconds: wanSeconds, size_used: wanSize, mode: "image_only",
       });
     }
 
@@ -1131,11 +1085,8 @@ Return JSON:
     if (videoSlug) {
       try {
         const job = await replicateCreateBySlug(videoSlug, {
-          prompt: vprompt,
-          size: wanSize,
-          duration: wanSeconds,
-          negative_prompt: "text, logo, watermark, letters, subtitles",
-          enable_prompt_expansion: true,
+          prompt: vprompt, size: wanSize, duration: wanSeconds,
+          negative_prompt: "text, logo, watermark, letters, subtitles", enable_prompt_expansion: true,
         });
         const done = await pollPredictionByUrl(job?.urls?.get, { tries: 240, delayMs: 1500 });
         const out = done?.output;
@@ -1146,11 +1097,8 @@ Return JSON:
     if (!video_url && process.env.REPLICATE_MODEL_VERSION_VIDEO) {
       try {
         const job = await replicatePredict(process.env.REPLICATE_MODEL_VERSION_VIDEO, {
-          prompt: vprompt,
-          size: wanSize,
-          duration: wanSeconds,
-          negative_prompt: "text, logo, watermark, letters, subtitles",
-          enable_prompt_expansion: true,
+          prompt: vprompt, size: wanSize, duration: wanSeconds,
+          negative_prompt: "text, logo, watermark, letters, subtitles", enable_prompt_expansion: true,
         });
         const out = job?.output;
         video_url = typeof out === "string" ? out : Array.isArray(out) ? out[0] : null;
@@ -1173,15 +1121,9 @@ Return JSON:
     }
 
     return res.json({
-      ok: true,
-      caption,
-      vprompt,
-      video_url: video_url || null,
-      image_url: image_url || null,
-      gpt_used: !!gptUsed,
-      ratio,
-      seconds: wanSeconds,
-      size_used: wanSize,
+      ok: true, caption, vprompt,
+      video_url: video_url || null, image_url: image_url || null,
+      gpt_used: !!gptUsed, ratio, seconds: wanSeconds, size_used: wanSize,
       mode: video_url ? "video" : image_url ? "image_fallback" : "text_only",
     });
   } catch (e) {
