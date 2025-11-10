@@ -6,6 +6,9 @@ import cors from "cors";
 import fetch from "node-fetch";
 import OpenAI from "openai";
 import "dotenv/config";
+import ffmpegPath from "ffmpeg-static";
+import ffmpeg from "fluent-ffmpeg";
+ffmpeg.setFfmpegPath(ffmpegPath);
 
 // --- upload deps
 import multer from "multer";
@@ -159,6 +162,84 @@ app.post("/api/upload", upload.single("file"), async (req, res) => {
   } catch (e) {
     console.error(e);
     return res.status(500).json({ error: "upload_failed" });
+  }
+});
+
+// ============ MAKE 2s MP4 FROM IMAGE (Ken Burns light) ============
+app.post("/api/make-video", async (req, res) => {
+  try {
+    const body = readBody(req.body);
+    const imageUrl = (body.image_url || body.image || "").toString().trim();
+    if (!/^https?:\/\//i.test(imageUrl)) {
+      return res.status(400).json({ ok:false, error:"image_url (http/https) is required" });
+    }
+
+    // ratio -> размеры
+    const ratio = String(body.ratio || "9:16").replace("-", ":");
+    const preset = ratio === "16:9" ? [1920,1080]
+                 : ratio === "1:1"  ? [1080,1080]
+                 : ratio === "4:5"  ? [1080,1350]
+                 : [1080,1920]; // 9:16 по умолчанию
+    const [W, H] = preset;
+    const DURATION = Math.max(1, Math.min(6, Number(body.duration_sec || 2))); // 2 сек по умолчанию
+    const FPS = 30;
+    const ZOOM = Math.max(1.0, Math.min(1.2, Number(body.zoom || 1.06)));      // лёгкий зум
+
+    // качаем картинку во временный файл
+    const tmpDir = path.join(process.cwd(), "tmp");
+    fs.mkdirSync(tmpDir, { recursive:true });
+    const inPath  = path.join(tmpDir, `in_${Date.now()}.jpg`);
+    const outName = `wall_${Date.now()}.mp4`;
+    const outPath = path.join(UPLOAD_DIR, outName);
+
+    // прокси-загрузка (чтобы обойти реферер/корс)
+    const r = await fetch(imageUrl);
+    if (!r.ok) {
+      let t=""; try{t=await r.text()}catch{}
+      return res.status(400).json({ ok:false, error:`fetch image failed ${r.status} ${t}` });
+    }
+    const buf = Buffer.from(await r.arrayBuffer());
+    fs.writeFileSync(inPath, buf);
+
+    // строим фильтры: скейл до канвы + плавный зум
+    // zoompan считает по кадрам: d = FPS * DURATION
+    const totalFrames = FPS * DURATION;
+    const zoomStep = (ZOOM - 1.0) / totalFrames; // линейно к концу
+    // Каденс: сохраняем центр, формат для iOS/Android
+    const vf = [
+      `scale=${W}:${H}:force_original_aspect_ratio=cover`,
+      `zoompan=z='min(1+on*${zoomStep.toFixed(6)},${ZOOM})':d=${totalFrames}:x='iw/2-(iw/zoom/2)':y='ih/2-(ih/zoom/2)':s=${W}x${H}`,
+      "format=yuv420p"
+    ].join(",");
+
+    await new Promise((resolve, reject) => {
+      ffmpeg()
+        .addInput(inPath)
+        .inputOptions([ "-loop 1" ]) // зацикливаем статику
+        .videoFilters(vf)
+        .outputOptions([
+          "-t", String(DURATION),
+          "-r", String(FPS),
+          "-movflags", "faststart",
+          "-pix_fmt", "yuv420p",
+          "-c:v", "libx264",
+          "-profile:v", "high",
+          "-level", "4.1",
+          "-b:v", "1800k"
+        ])
+        .save(outPath)
+        .on("end", resolve)
+        .on("error", reject);
+    });
+
+    // чистим tmp
+    try { fs.unlinkSync(inPath); } catch {}
+
+    // отдаём публичный URL
+    return res.json({ ok:true, url: absUrl(req, `/uploads/${outName}`) });
+  } catch (e) {
+    console.error("make-video failed:", e);
+    return res.status(500).json({ ok:false, error:String(e.message || e) });
   }
 });
 
@@ -1152,3 +1233,4 @@ Return JSON:
 /* ====================== START ====================== */
 const port = process.env.PORT || 8080;
 app.listen(port, () => console.log(`HI-AI backend on :${port}`));
+
