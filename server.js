@@ -11,6 +11,7 @@ import "dotenv/config";
 import multer from "multer";
 import path from "path";
 import fs from "fs";
+import crypto from "crypto";
 
 const app = express();
 app.set("trust proxy", true);
@@ -95,18 +96,18 @@ function makeDataUrlSafe(dataUrl) {
   const s = String(dataUrl || "").trim();
   if (!s.startsWith("data:")) return null;
   if (!/data:[^;]+;base64,/.test(s)) {
-    return `data:image/png;base64,{${s.replace(/^data:[^,]+,/, "")}`;
+    return `data:image/png;base64,${s.replace(/^data:[^,]+,/, "")}`;
   }
   return s;
 }
 
 /* ====================== SHORT LINKS ( /api/shorten , /t/:code ) ====================== */
 // Файл хранится на диске (не пропадёт после деплоя)
-const DATA_DIR = process.env.SHORTS_DIR || "/data";
-try { fs.mkdirSync(DATA_DIR, { recursive: true }); } catch {}
-const SHORTS_FILE = path.join(DATA_DIR, "shorts.json");
+const SHORTS_DIR = process.env.SHORTS_DIR || "/data";
+try { fs.mkdirSync(SHORTS_DIR, { recursive: true }); } catch {}
+const SHORTS_FILE = path.join(SHORTS_DIR, "shorts.json");
 
-// Домен для ответа (если задан SHORT_PUBLIC — он попадёт в ответах)
+// Домен для ответа (если не задан — берём текущий хост)
 const SHORT_PUBLIC = (process.env.SHORT_PUBLIC || process.env.PUBLIC_ORIGIN || "").replace(/\/+$/,"");
 
 // Длина кода
@@ -132,19 +133,20 @@ function genCode(len){
   return s.slice(-L);
 }
 
-// POST /api/shorten  — JSON {url, code?}
 app.post("/api/shorten", async (req, res) => {
   try {
     const body = readBody(req.body);
     const url  = String(body.url||"").trim();
     let   code = (body.code||"").toString().trim();
     if(!url) return res.status(400).json({ ok:false, error:"missing url" });
+
+    // Разрешаем http(s) и data:
     if(!/^https?:\/\//i.test(url) && !/^data:/i.test(url))
       return res.status(400).json({ ok:false, error:"bad url" });
 
     const db = loadShortDB();
 
-    // если такой URL уже есть — отдать старый код
+    // идемпотентность: если уже есть такой URL — вернуть старый код
     const ex = Object.entries(db.map).find(([,v]) => v.url === url);
     if (ex) {
       const c = ex[0];
@@ -166,51 +168,11 @@ app.post("/api/shorten", async (req, res) => {
 
     return res.json({ ok:true, short:`${SHORT_PUBLIC || absoluteOrigin(req)}/t/${code}`, code });
   } catch(e){
-    console.error("shorten(post):", e);
+    console.error("shorten:", e);
     return res.status(500).json({ ok:false, error:"shorten_failed" });
   }
 });
 
-// GET /api/shorten?url=...&code=... — удобно вызывать с телефона
-app.get("/api/shorten", (req, res) => {
-  try {
-    const url = String(req.query.url || "").trim();
-    let code  = String(req.query.code || "").trim();
-
-    if (!url) return res.status(400).json({ ok:false, error:"missing url" });
-    if (!/^https?:\/\//i.test(url) && !/^data:/i.test(url))
-      return res.status(400).json({ ok:false, error:"bad url" });
-
-    const db = loadShortDB();
-
-    // уже существующий URL
-    const ex = Object.entries(db.map).find(([,v]) => v.url === url);
-    if (ex) {
-      const c = ex[0];
-      return res.json({ ok:true, short:`${SHORT_PUBLIC || absoluteOrigin(req)}/t/${c}`, code:c });
-    }
-
-    // желаемый код
-    if (code) {
-      code = code.replace(/[^0-9A-Za-z]/g,'').slice(0,8);
-      if (!code) return res.status(400).json({ ok:false, error:"bad code" });
-      if (db.map[code]) return res.status(409).json({ ok:false, error:"code_taken" });
-    } else {
-      code = genCode(3);
-      while (db.map[code]) code = genCode(Math.min(CODE_MAX, code.length+1));
-    }
-
-    db.map[code] = { url, ts: Date.now(), hits: 0 };
-    saveShortDB(db);
-
-    return res.json({ ok:true, short:`${SHORT_PUBLIC || absoluteOrigin(req)}/t/${code}`, code });
-  } catch(e){
-    console.error("shorten(get):", e);
-    return res.status(500).json({ ok:false, error:"shorten_failed" });
-  }
-});
-
-// Инфо по коду
 app.get("/api/shorten/:code", (req,res)=>{
   const db = loadShortDB();
   const r = db.map[req.params.code];
@@ -218,7 +180,6 @@ app.get("/api/shorten/:code", (req,res)=>{
   return res.json({ ok:true, code:req.params.code, ...r });
 });
 
-// Редирект
 app.get("/t/:code", (req,res)=>{
   const db = loadShortDB();
   const r = db.map[req.params.code];
@@ -245,7 +206,6 @@ app.post("/api/upload", upload.single("file"), async (req, res) => {
 });
 
 /* ====================== ROBUST IMAGE PROXY (fix 403/456) ====================== */
-// GET /api/proxy?u=<absolute image url>
 app.get("/api/proxy", async (req, res) => {
   try {
     const raw = String(req.query.u || "").trim();
@@ -287,11 +247,10 @@ app.get("/api/proxy", async (req, res) => {
 });
 
 /* ====================== SIMPLE GENERATE (SAVE CANVAS DATAURL) ====================== */
-// Принимает { image: "<dataURL | http(s)>" , templateId?: "..." } и сохраняет в /uploads
 app.post("/api/generate", async (req, res) => {
   try {
     const body = readBody(req.body);
-    const imgIn = String(body?.image || "").trim(); // data:URL или https URL
+    const imgIn = String(body?.image || "").trim();
     if (!imgIn) return res.status(400).json({ ok: false, error: "missing image" });
 
     let buf, mime = "image/jpeg", ext = "jpg";
@@ -306,7 +265,8 @@ app.post("/api/generate", async (req, res) => {
       const r = await fetch(imgIn);
       if (!r.ok) return res.status(400).json({ ok: false, error: `fetch failed: ${r.status}` });
       mime = r.headers.get("content-type") || "image/jpeg";
-      buf = Buffer.from(await r.arrayBuffer());
+      const ab = await r.arrayBuffer();
+      buf = Buffer.from(ab);
       ext = mime.includes("png") ? "png" : mime.includes("webp") ? "webp" : "jpg";
     } else {
       return res.status(400).json({ ok: false, error: "image must be data:URL or http(s) URL" });
@@ -356,7 +316,7 @@ async function pollPredictionByUrl(getUrl, { tries = 240, delayMs = 1500 } = {})
     });
     if (last.status === "succeeded") return last;
     if (last.status === "failed" || last.status === "canceled") {
-      throw new Error(`Replicate failed: ${last?.error || ${last?.status} || ${last?.logs} || "unknown"}`);
+      throw new Error(`Replicate failed: ${last?.error || last?.status || last?.logs || "unknown"}`);
     }
     await sleep(delayMs);
   }
@@ -385,10 +345,10 @@ const MODELS = {
 
 function chooseImageModelKey({ idea, style, hint }) {
   const h = String(hint || "auto").toLowerCase();
-  if (h === "sdxl" || "flux") return h;
+  if (h === "sdxl" || h === "flux") return h;
   const st = String(style || "auto").toLowerCase();
-  if (st === "cartoon3d" || "illustrated") return "flux";
-  if (st === "futuristic" || "realistic") return "sdxl";
+  if (st === "cartoon3d" || st === "illustrated") return "flux";
+  if (st === "futuristic" || st === "realistic") return "sdxl";
   const isFun = /halloween|kids|pizza|party|fun|gymnastics/i.test(idea || "");
   return isFun ? "flux" : "sdxl";
 }
@@ -642,7 +602,7 @@ app.post("/api/image-studio", async (req, res) => {
     const action = String(actionRaw).toLowerCase();
     const promptRaw = (body.prompt || "").trim();
     const aspect = body.aspect_ratio || DEFAULT_AR;
-    the strength = body.strength ?? DEFAULT_STRENGTH;
+    const strength = body.strength ?? DEFAULT_STRENGTH;
     const seed = body.seed ?? null;
     const seed_lock = !!body.seed_lock;
     const camera_path = String(body.camera_path || "none").toLowerCase();
@@ -686,6 +646,7 @@ app.post("/api/image-studio", async (req, res) => {
         await sleep(1200);
       }
     }
+
     const jitterStrength = (base) => {
       const b = isFinite(base) ? Number(base) : DEFAULT_STRENGTH;
       const j = Math.random() * 0.12 - 0.06;
@@ -823,7 +784,7 @@ app.post("/api/video-studio", async (req, res) => {
     };
 
     const mode = String(body.mode || "text2video").toLowerCase();
-    const idea = String(body.idea || body.prompt || "").trim();
+    const idea = String(body.idea || body.prompt || "").toString().trim();
     const style = String(body.style || "auto").toLowerCase();
     const ratio = String(body.ratio || "9:16").replace("-", ":");
     const secs = fitDurationToWan(body.video_seconds ?? body.duration_seconds ?? 5);
@@ -841,7 +802,7 @@ app.post("/api/video-studio", async (req, res) => {
 
     if (mode !== "image2video" && !idea) return res.json({ ok: false, error: "Missing 'idea' for text2video" });
 
-    // ---------- I2V: принять ВСЕ варианты источника ----------
+    // ---------- I2V ----------
     let incomingImage =
       (body.image_data_url && String(body.image_data_url).trim()) ||
       (body.image && String(body.image).trim()) ||
