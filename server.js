@@ -205,82 +205,6 @@ app.post("/api/upload", upload.single("file"), async (req, res) => {
   }
 });
 
-/* ====================== URL SHORTENER ====================== */
-/* — лёгкий файловый шортер: /api/shorten и /t/:slug — */
-
-const DATA_DIR = path.join(process.cwd(), "data");
-const SHORT_DB = path.join(DATA_DIR, "shorts.json");
-fs.mkdirSync(DATA_DIR, { recursive: true });
-
-function loadShorts() {
-  try { return JSON.parse(fs.readFileSync(SHORT_DB, "utf8")); }
-  catch { return { bySlug: {}, byUrl: {} }; }
-}
-function saveShorts(db) {
-  fs.writeFileSync(SHORT_DB, JSON.stringify(db, null, 2));
-}
-
-// base62 helpers, детерминированный slug по URL
-const ALPHABET = "0123456789abcdefghijklmnopqrstuvwxyzABCDEFGHIJKLMNOPQRSTUVWXYZ";
-function toBase62Buf(buf) {
-  let num = BigInt("0x" + buf.toString("hex"));
-  let out = "";
-  while (num > 0n) {
-    const r = Number(num % 62n);
-    out = ALPHABET[r] + out;
-    num = num / 62n;
-  }
-  return out || "0";
-}
-import crypto from "crypto";
-function slugFor(url, len = 3) {
-  const h = crypto.createHash("sha1").update(url).digest(); // sha1 детерминирован
-  const b62 = toBase62Buf(h);
-  let s = b62;
-  if (s.length < len) s = (s + "00000").slice(0, len);
-  return s.slice(0, len);
-}
-
-// POST /api/shorten { url }
-app.post("/api/shorten", (req, res) => {
-  try {
-    let { url } = readBody(req.body);
-    if (!url || typeof url !== "string") return res.status(400).json({ ok:false, error:"No url" });
-    url = url.trim();
-
-    // уже есть?
-    const db = loadShorts();
-    const existed = db.byUrl[url];
-    const SHORT_HOST = (process.env.SHORT_PUBLIC || "").replace(/\/+$/, "") || absoluteOrigin(req);
-    if (existed) return res.json({ ok:true, short: `${SHORT_HOST}/t/${existed}` });
-
-    // генерим слуг, расширяем при коллизии
-    let len = 3;
-    let slug = slugFor(url, len);
-    while (db.bySlug[slug] && db.bySlug[slug] !== url) {
-      len++;
-      if (len > 8) return res.status(500).json({ ok:false, error:"Too many collisions" });
-      slug = slugFor(url, len);
-    }
-    db.bySlug[slug] = url;
-    db.byUrl[url] = slug;
-    saveShorts(db);
-
-    return res.json({ ok:true, short: `${SHORT_HOST}/t/${slug}` });
-  } catch (e) {
-    console.error("shorten error", e);
-    return res.status(500).json({ ok:false, error:String(e) });
-  }
-});
-
-// GET /t/:slug → 302 на длинный URL
-app.get("/t/:slug", (req, res) => {
-  const db = loadShorts();
-  const url = db.bySlug[req.params.slug];
-  if (!url) return res.status(404).send("Not found");
-  res.redirect(302, url);
-});
-
 /* ====================== ROBUST IMAGE PROXY (fix 403/456) ====================== */
 // GET /api/proxy?u=<absolute image url>
 app.get("/api/proxy", async (req, res) => {
@@ -1272,6 +1196,7 @@ Return JSON:
 /* ====================== START ====================== */
 const port = process.env.PORT || 8080;
 app.listen(port, () => console.log(`HI-AI backend on :${port}`));
+
 
 
 
