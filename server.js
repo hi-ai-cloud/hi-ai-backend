@@ -7,13 +7,13 @@ import fetch from "node-fetch";
 import OpenAI from "openai";
 import "dotenv/config";
 
-// --- system & ffmpeg
+// system & ffmpeg
 import os from "os";
 import { execFile } from "child_process";
 import { promisify } from "util";
 import ffmpegPath from "ffmpeg-static";
 
-// --- uploads
+// uploads
 import multer from "multer";
 import path from "path";
 import fs from "fs";
@@ -52,7 +52,7 @@ function absUrl(req, p) {
   return `${base}${p.startsWith("/") ? "" : "/"}${p}`;
 }
 
-/* ====================== FFMPEG HELPERS ====================== */
+/* ====================== FFMPEG (ONE helper) ====================== */
 const execFileP = promisify(execFile);
 async function runFfmpeg(args = []) {
   if (!ffmpegPath) throw new Error("ffmpeg binary not found (ffmpeg-static)");
@@ -118,8 +118,6 @@ function makeDataUrlSafe(dataUrl) {
 }
 
 /* ====================== 2S VIDEO HELPERS (SAFE) ====================== */
-// все под страховкой: если ffmpeg отсутствует на окружении — ничего не падает,
-// возвращаем исходное видео без тримминга.
 function ensureEven(n){ return (n % 2 === 0) ? n : n - 1; }
 function parseSizeStr(sz){
   if (!sz) return [1080,1920];
@@ -131,20 +129,7 @@ function tmpFile(ext){
   const dir = fs.mkdtempSync(path.join(os.tmpdir(), "hi-ai-"));
   return path.join(dir, `f_${Date.now()}_${Math.random().toString(36).slice(2)}.${ext}`);
 }
-async function runFfmpeg(args){
-  if (!ffmpeg) throw new Error("ffmpeg-static is not available");
-  return await new Promise((resolve, reject)=>{
-    const p = spawn(ffmpeg, args, { stdio: ["ignore","pipe","pipe"] });
-    let out = "", err = "";
-    p.stdout.on("data", d=> out += d.toString());
-    p.stderr.on("data", d=> err += d.toString());
-    p.on("close", code=>{
-      if (code===0) resolve({out,err});
-      else reject(new Error(`ffmpeg exit ${code}\n${err}`));
-    });
-  });
-}
-/** Буфер → MP4/H264, ровно 2.00s, faststart, вписан в ratio */
+/** buffer → MP4/H264, 2.00s, faststart, fit into ratio with pad */
 async function transcodeTo2sMp4(buf, { sizeStr = "1080*1920", fps = 30 } = {}){
   const [tw0, th0] = parseSizeStr(sizeStr);
   const tw = ensureEven(tw0), th = ensureEven(th0);
@@ -174,30 +159,27 @@ async function transcodeTo2sMp4(buf, { sizeStr = "1080*1920", fps = 30 } = {}){
   ];
 
   await runFfmpeg(args);
-  const outBuf = fs.readFileSync(outFile);
 
+  const outBuf = fs.readFileSync(outFile);
   try { fs.unlinkSync(inFile); } catch {}
   try { fs.unlinkSync(outFile); } catch {}
-
   return outBuf;
 }
-/** URL видео → локальный 2s mp4 в /uploads → вернуть abs URL */
+/** URL → local 2s mp4 in /uploads → absolute URL */
 async function makeLocal2sVideoFromUrl(req, srcUrl, { sizeStr = "1080*1920" } = {}){
   const r = await fetch(srcUrl);
   if (!r.ok) throw new Error(`fetch video ${r.status}`);
   const buf = Buffer.from(await r.arrayBuffer());
   const out = await transcodeTo2sMp4(buf, { sizeStr });
-
-  const name = `${Date.now()}_${crypto.randomBytes(3).toString("hex")}_2s.mp4`;
+  const name = `${Date.now()}_${Math.random().toString(36).slice(2,8)}_2s.mp4`;
   const full = path.join(UPLOAD_DIR, name);
   fs.writeFileSync(full, out);
   return absUrl(req, `/uploads/${name}`);
 }
-/** Мягкая обёртка: если нет ffmpeg — вернём исходный URL */
+/** Soft wrapper: if ffmpeg is missing, return original URL */
 async function tryMake2s(req, videoUrl, sizeStr){
   try {
     if (!videoUrl) return videoUrl;
-    if (!ffmpeg) throw new Error("no ffmpeg");
     return await makeLocal2sVideoFromUrl(req, videoUrl, { sizeStr });
   } catch (e) {
     console.warn("2s trim skipped:", e?.message || e);
@@ -205,24 +187,39 @@ async function tryMake2s(req, videoUrl, sizeStr){
   }
 }
 
-/* ====================== UPLOAD (form-data file) ====================== */
-const upload = multer({ storage: multer.memoryStorage() });
+/* ====================== HEALTH & ENV CHECK ====================== */
+app.get("/health", (_, res) => res.json({ ok: true, ts: Date.now() }));
+app.get("/env-check", (_, res) => {
+  res.json({
+    REPLICATE_API_TOKEN: !!process.env.REPLICATE_API_TOKEN,
+    OPENAI_API_KEY: !!process.env.OPENAI_API_KEY,
+    REPLICATE_MODEL_VERSION_SDXL: !!process.env.REPLICATE_MODEL_VERSION_SDXL,
+    REPLICATE_MODEL_VERSION_FLUX: !!process.env.REPLICATE_MODEL_VERSION_FLUX,
+    REPLICATE_MODEL_VERSION_VIDEO: !!process.env.REPLICATE_MODEL_VERSION_VIDEO,
+    REPLICATE_MODEL_VERSION_I2V: !!process.env.REPLICATE_MODEL_VERSION_I2V,
+    PUBLIC_ORIGIN: process.env.PUBLIC_ORIGIN || null,
+  });
+});
 
-app.post("/api/upload", upload.single("file"), async (req, res) => {
-  try {
-    if (!req.file) return res.status(400).json({ error: "no_file" });
-    const safeName = (req.file.originalname || "file.bin").replace(/\s+/g, "_");
-    const name = `${Date.now()}_${safeName}`;
-    fs.writeFileSync(path.join(UPLOAD_DIR, name), req.file.buffer);
-    return res.json({ url: absUrl(req, `/uploads/${name}`) });
-  } catch (e) {
-    console.error(e);
-    return res.status(500).json({ error: "upload_failed" });
+/* ====================== SMART ROOT DISPATCH ====================== */
+app.post("/", (req, res) => {
+  const body = readBody(req.body);
+  const action = String(body?.action || "").toLowerCase();
+  const imageActions = new Set(["text2img", "img2img", "inpaint", "remove_bg", "upscale", "add_object"]);
+  const videoActions = new Set(["text2video", "image2video"]);
+  if (imageActions.has(action)) {
+    req.url = "/api/image-studio";
+    app._router.handle(req, res);
+  } else if (videoActions.has(action)) {
+    req.url = "/api/video-studio";
+    app._router.handle(req, res);
+  } else {
+    req.url = "/api/brand-post";
+    app._router.handle(req, res);
   }
 });
 
-/* ====================== ROBUST IMAGE PROXY (fix 403/456) ====================== */
-// GET /api/proxy?u=<absolute image url>
+/* ====================== ROBUST IMAGE PROXY ====================== */
 app.get("/api/proxy", async (req, res) => {
   try {
     const raw = String(req.query.u || "").trim();
@@ -327,9 +324,7 @@ async function replicateCreateBySlug(slug, input) {
 async function pollPredictionByUrl(getUrl, { tries = 240, delayMs = 1500 } = {}) {
   let last = null;
   for (let i = 0; i < tries; i++) {
-    last = await fetchJson(getUrl, {
-      headers: { Authorization: `Token ${process.env.REPLICATE_API_TOKEN}` }
-    });
+    last = await fetchJson(getUrl, { headers: { Authorization: `Token ${process.env.REPLICATE_API_TOKEN}` } });
     if (last.status === "succeeded") return last;
     if (last.status === "failed" || last.status === "canceled") {
       throw new Error(`Replicate failed: ${last?.error || last?.status || last?.logs || "unknown"}`);
@@ -338,27 +333,13 @@ async function pollPredictionByUrl(getUrl, { tries = 240, delayMs = 1500 } = {})
   }
   throw new Error("Replicate timeout");
 }
-
 async function replicatePredict(version, input, pollCfg) {
   const job = await replicateCreate(version, input);
   const done = await pollPredictionByUrl(job?.urls?.get, pollCfg);
   return done;
 }
 
-/* ====================== MODEL MAPS ====================== */
-const MODELS = {
-  realistic: process.env.REPLICATE_MODEL_SLUG_REALISTIC,
-  cartoon: process.env.REPLICATE_MODEL_SLUG_CARTOON,
-  futuristic: process.env.REPLICATE_MODEL_SLUG_FUTURISTIC,
-  i2v_hd: process.env.REPLICATE_MODEL_SLUG_I2V_HD,
-
-  sdxl: process.env.REPLICATE_MODEL_VERSION_SDXL, // version id
-  flux: process.env.REPLICATE_MODEL_VERSION_FLUX, // version id
-  video: process.env.REPLICATE_MODEL_VERSION_VIDEO,
-  i2v: process.env.REPLICATE_MODEL_VERSION_I2V,
-  def: process.env.REPLICATE_MODEL_VERSION,
-};
-
+/* ====================== MODEL PICK ====================== */
 function chooseImageModelKey({ idea, style, hint }) {
   const h = String(hint || "auto").toLowerCase();
   if (h === "sdxl" || h === "flux") return h;
@@ -368,38 +349,6 @@ function chooseImageModelKey({ idea, style, hint }) {
   const isFun = /halloween|kids|pizza|party|fun|gymnastics/i.test(idea || "");
   return isFun ? "flux" : "sdxl";
 }
-
-/* ====================== HEALTH & ENV CHECK ====================== */
-app.get("/health", (_, res) => res.json({ ok: true, ts: Date.now() }));
-app.get("/env-check", (_, res) => {
-  res.json({
-    REPLICATE_API_TOKEN: !!process.env.REPLICATE_API_TOKEN,
-    OPENAI_API_KEY: !!process.env.OPENAI_API_KEY,
-    REPLICATE_MODEL_VERSION_SDXL: !!process.env.REPLICATE_MODEL_VERSION_SDXL,
-    REPLICATE_MODEL_VERSION_FLUX: !!process.env.REPLICATE_MODEL_VERSION_FLUX,
-    REPLICATE_MODEL_VERSION_VIDEO: !!process.env.REPLICATE_MODEL_VERSION_VIDEO,
-    REPLICATE_MODEL_VERSION_I2V: !!process.env.REPLICATE_MODEL_VERSION_I2V,
-    PUBLIC_ORIGIN: process.env.PUBLIC_ORIGIN || null,
-  });
-});
-
-/* ====================== SMART ROOT DISPATCH ====================== */
-app.post("/", (req, res) => {
-  const body = readBody(req.body);
-  const action = String(body?.action || "").toLowerCase();
-  const imageActions = new Set(["text2img", "img2img", "inpaint", "remove_bg", "upscale", "add_object"]);
-  const videoActions = new Set(["text2video", "image2video"]);
-  if (imageActions.has(action)) {
-    req.url = "/api/image-studio";
-    app._router.handle(req, res);
-  } else if (videoActions.has(action)) {
-    req.url = "/api/video-studio";
-    app._router.handle(req, res);
-  } else {
-    req.url = "/api/brand-post";
-    app._router.handle(req, res);
-  }
-});
 
 /* ====================== BRAND POST ====================== */
 app.post("/api/brand-post", async (req, res) => {
@@ -867,7 +816,6 @@ app.post("/api/video-studio", async (req, res) => {
         }
       }
 
-      // === ОБРЕЗКА ДО 2s (если есть видео) ===
       if (video_url) {
         video_url = await tryMake2s(req, video_url, size);
       }
@@ -933,18 +881,11 @@ app.post("/api/video-studio", async (req, res) => {
         return res.json({ ok: false, error: `Replicate i2v error: ${e.message}` });
       }
 
-      // === ОБРЕЗКА ДО 2s ДЛЯ I2V ===
       if (video_url) {
         video_url = await tryMake2s(req, video_url, size);
       }
     }
 
-    // === FORCE VIDEO ветка (нужно обрезать до возврата) ===
-    if (String(body.mode || "").toLowerCase() === "text2video" && body.force_video) {
-      // уже обработано выше в text2video (video_url trimmed if exists)
-    }
-
-    // === Если пользователь явно форсирует видео через заголовки/параметры ===
     const forceVideoHeader = String(req.header("X-Force-Video") || "").trim() === "1";
     const textOnlyHeader   = String(req.header("X-Text-Only") || "").trim() === "1";
     const force_video = forceVideoHeader || String(body.mode || "").toLowerCase() === "text2video" || String(body.mode || "").toLowerCase() === "video" || String(body.mode || "").toLowerCase() === "reels";
@@ -962,7 +903,6 @@ app.post("/api/video-studio", async (req, res) => {
       });
     }
 
-    // Если пользователь потребовал строго видео и оно есть — вернуть (уже trimmed если было)
     if (force_video) {
       if (!video_url) {
         return res.status(502).json({ ok: false, error: "Video generation failed (forced). Check model slug/version logs." });
@@ -973,20 +913,19 @@ app.post("/api/video-studio", async (req, res) => {
         video_url,
         image_url: null,
         ratio,
-        seconds: 2,            // уже обрезали до 2s
+        seconds: 2,
         size_used: size,
         mode: "video",
       });
     }
 
-    // Комбинированный обычный ответ
     return res.json({
       ok: true,
       vprompt,
       video_url: video_url || null,
       image_url: image_url || null,
       ratio,
-      seconds: video_url ? 2 : secs, // если есть видео — говорим честно "2"
+      seconds: video_url ? 2 : secs,
       size_used: size,
       mode: video_url ? "video" : image_url ? "image_fallback" : "text_only",
     });
@@ -1148,7 +1087,7 @@ Return JSON:
         });
       }
 
-      // обрезка до 2s перед возвратом
+      // trim to 2s
       video_url = await tryMake2s(req, video_url, wanSize);
 
       return res.json({
@@ -1196,8 +1135,8 @@ Return JSON:
       } catch {}
     }
 
-    // если видео так и не вышло — фоллбек в картинку
-    if (!video_url && opts.image !== false) {
+    if (!video_url) {
+      const imageModelKey = chooseImageModelKey({ idea, style, hint: "auto" });
       const versionImg = imageModelKey === "flux" ? process.env.REPLICATE_MODEL_VERSION_FLUX : process.env.REPLICATE_MODEL_VERSION_SDXL;
       if (versionImg) {
         const inputI =
@@ -1212,7 +1151,6 @@ Return JSON:
       }
     }
 
-    // если получилось видео — делаем его 2s
     if (video_url) {
       video_url = await tryMake2s(req, video_url, wanSize);
     }
@@ -1233,22 +1171,33 @@ Return JSON:
     res.status(500).json({ ok: false, error: String(e.message || e) });
   }
 });
-// ============ 2-SECOND VIDEO TRIM ============
+
+/* ====================== FILE UPLOAD (save as-is) ====================== */
+app.post("/api/upload", upload.single("file"), async (req, res) => {
+  try {
+    if (!req.file) return res.status(400).json({ error: "no_file" });
+    const safeName = (req.file.originalname || "file.bin").replace(/\s+/g, "_");
+    const name = `${Date.now()}_${safeName}`;
+    fs.writeFileSync(path.join(UPLOAD_DIR, name), req.file.buffer);
+    return res.json({ url: absUrl(req, `/uploads/${name}`) });
+  } catch (e) {
+    console.error(e);
+    return res.status(500).json({ error: "upload_failed" });
+  }
+});
+
+/* ====================== 2-SECOND VIDEO TRIM ROUTE ====================== */
 app.post("/api/video-2s", upload.single("file"), async (req, res) => {
   try {
     if (!req.file) return res.status(400).json({ ok: false, error: "no_file" });
 
-    // Имя файла и пути
     const orig = (req.file.originalname || "video.mp4").replace(/\s+/g, "_");
     const base = orig.replace(/\.[a-z0-9]+$/i, "") || "clip";
     const tmpIn  = path.join(os.tmpdir(), `hi-ai_in_${Date.now()}.mp4`);
     const tmpOut = path.join(os.tmpdir(), `hi-ai_out_${Date.now()}.mp4`);
 
-    // Пишем входной буфер во временный файл
     fs.writeFileSync(tmpIn, req.file.buffer);
 
-    // Режем до 2.00 секунд, быстрый пресет, совместимый MP4
-    // (без изменения аспекта; movflags +faststart для web)
     const ffArgs = [
       "-y",
       "-i", tmpIn,
@@ -1264,24 +1213,20 @@ app.post("/api/video-2s", upload.single("file"), async (req, res) => {
     ];
     await runFfmpeg(ffArgs);
 
-    // Переносим результат в /public/uploads
     const outName = `${Date.now()}_${base}_2s.mp4`;
     const finalPath = path.join(UPLOAD_DIR, outName);
     fs.copyFileSync(tmpOut, finalPath);
 
-    // Убираем временные файлы
     try { fs.unlinkSync(tmpIn); } catch {}
     try { fs.unlinkSync(tmpOut); } catch {}
 
-    // Отдаём короткий абсолютный URL
     return res.json({ ok: true, url: absUrl(req, `/uploads/${outName}`) });
   } catch (e) {
     console.error("VIDEO_2S_ERROR:", e);
     return res.status(500).json({ ok: false, error: String(e.message || e) });
   }
 });
+
 /* ====================== START ====================== */
 const port = process.env.PORT || 8080;
 app.listen(port, () => console.log(`HI-AI backend on :${port}`));
-
-
