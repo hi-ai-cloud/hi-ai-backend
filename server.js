@@ -1186,34 +1186,57 @@ app.post("/api/upload", upload.single("file"), async (req, res) => {
   }
 });
 
-/* ====================== 2-SECOND VIDEO TRIM ROUTE ====================== */
+/* ====================== 2-SECOND VIDEO TRIM ROUTE (file OR url + optional watermark) ====================== */
 app.post("/api/video-2s", upload.single("file"), async (req, res) => {
   try {
-    if (!req.file) return res.status(400).json({ ok: false, error: "no_file" });
+    // 1) принять либо файл, либо URL
+    let inputBuf = null;
+    let baseName = "clip";
+    if (req.file && req.file.buffer) {
+      inputBuf = req.file.buffer;
+      baseName = (req.file.originalname || "video.mp4").replace(/\s+/g, "_").replace(/\.[a-z0-9]+$/i,"") || "clip";
+    } else if (req.body && typeof req.body.url === "string" && /^https?:\/\//i.test(req.body.url)) {
+      const r = await fetch(req.body.url);
+      if (!r.ok) return res.status(400).json({ ok:false, error:`fetch url failed: ${r.status}` });
+      const ab = await r.arrayBuffer();
+      inputBuf = Buffer.from(ab);
+      baseName = "remote";
+    } else {
+      return res.status(400).json({ ok:false, error:"no_file_or_url" });
+    }
 
-    const orig = (req.file.originalname || "video.mp4").replace(/\s+/g, "_");
-    const base = orig.replace(/\.[a-z0-9]+$/i, "") || "clip";
+    // 2) временные файлы
     const tmpIn  = path.join(os.tmpdir(), `hi-ai_in_${Date.now()}.mp4`);
     const tmpOut = path.join(os.tmpdir(), `hi-ai_out_${Date.now()}.mp4`);
+    fs.writeFileSync(tmpIn, inputBuf);
 
-    fs.writeFileSync(tmpIn, req.file.buffer);
+    // 3) watermark флаг
+    const wantWM = String(req.body?.wm || "").trim() === "1";
+    const fontPath = process.env.FONT_PATH || "/usr/share/fonts/truetype/dejavu/DejaVuSans-Bold.ttf";
+    const hasFont = (()=>{ try { return fs.existsSync(fontPath); } catch { return false; } })();
+
+    let vf = null;
+    if (wantWM && hasFont) {
+      vf = `drawtext=fontfile='${fontPath}':text='HI-AI':fontcolor=white@0.7:fontsize=36:x=w-tw-20:y=h-th-20`;
+    }
 
     const ffArgs = [
       "-y",
       "-i", tmpIn,
-      "-t", "2",
+      "-t", "2.0",
+      ...(vf ? ["-vf", vf] : []),
       "-movflags", "+faststart",
       "-c:v", "libx264",
       "-preset", "veryfast",
       "-crf", "23",
       "-pix_fmt", "yuv420p",
-      "-c:a", "aac",
-      "-b:a", "128k",
+      // всегда немой — стабильно для lockscreen и не падает на аудио
+      "-an",
       tmpOut
     ];
     await runFfmpeg(ffArgs);
 
-    const outName = `${Date.now()}_${base}_2s.mp4`;
+    const outName = `${Date.now()}_${baseName}_2s.mp4`;
     const finalPath = path.join(UPLOAD_DIR, outName);
     fs.copyFileSync(tmpOut, finalPath);
 
@@ -1223,7 +1246,10 @@ app.post("/api/video-2s", upload.single("file"), async (req, res) => {
     return res.json({ ok: true, url: absUrl(req, `/uploads/${outName}`) });
   } catch (e) {
     console.error("VIDEO_2S_ERROR:", e);
-    return res.status(500).json({ ok: false, error: String(e.message || e) });
+    const hint = String(e?.message || "").includes("ffmpeg binary not found")
+      ? "ffmpeg-static missing — add to dependencies"
+      : undefined;
+    return res.status(500).json({ ok: false, error: hint || String(e.message || e) });
   }
 });
 
