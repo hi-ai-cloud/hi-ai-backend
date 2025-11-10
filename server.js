@@ -102,29 +102,28 @@ function makeDataUrlSafe(dataUrl) {
 
 /* ====================== SHORT LINKS ( /api/shorten , /t/:code ) ====================== */
 
-const SHORT_DB = path.join(process.cwd(), "public", "short.json");
+// отдельное имя, чтобы не конфликтовало с любыми SHORT_DB выше
+const SHORTS_FILE = path.join(process.cwd(), "public", "shorts.json");
 const SHORT_PUBLIC = (process.env.SHORT_PUBLIC || process.env.PUBLIC_ORIGIN || "").replace(/\/+$/,"");
 const CODE_MIN = parseInt(process.env.SHORT_MIN || "3", 10);
 const CODE_MAX = parseInt(process.env.SHORT_MAX || "6", 10);
 
 function loadShortDB(){
-  try { return JSON.parse(fs.readFileSync(SHORT_DB, "utf8")); }
+  try { return JSON.parse(fs.readFileSync(SHORTS_FILE, "utf8")); }
   catch { return { map:{}, created: Date.now() }; }
 }
 function saveShortDB(db){
   try {
-    fs.mkdirSync(path.dirname(SHORT_DB), { recursive: true });
-    fs.writeFileSync(SHORT_DB, JSON.stringify(db, null, 2));
+    fs.mkdirSync(path.dirname(SHORTS_FILE), { recursive: true });
+    fs.writeFileSync(SHORTS_FILE, JSON.stringify(db, null, 2));
   } catch {}
 }
 
-function b62(n){ 
-  const a="0123456789abcdefghijklmnopqrstuvwxyzABCDEFGHIJKLMNOPQRSTUVWXYZ"; 
-  let s=""; 
-  do { s=a[n%62]+s; n=Math.floor(n/62); } while(n>0); 
-  return s; 
+function b62(n){
+  const a="0123456789abcdefghijklmnopqrstuvwxyzABCDEFGHIJKLMNOPQRSTUVWXYZ";
+  let s=""; do{ s=a[n%62]+s; n=Math.floor(n/62);}while(n>0);
+  return s;
 }
-
 function genCode(len){
   const L = Math.max(CODE_MIN, Math.min(CODE_MAX, len||4));
   let n = Math.floor(Math.random()*62**L);
@@ -137,13 +136,13 @@ app.post("/api/shorten", async (req, res) => {
     const body = readBody(req.body);
     const url = String(body.url||"").trim();
     if(!url) return res.status(400).json({ ok:false, error:"missing url" });
-
-    // Безопасность: разрешим http(s) и data:
     if(!/^https?:\/\//i.test(url) && !/^data:/i.test(url)){
       return res.status(400).json({ ok:false, error:"bad url" });
     }
 
     const db = loadShortDB();
+
+    // идемпотентность: возвращаем уже существующий код для того же URL
     const existing = Object.entries(db.map).find(([,v]) => v.url === url);
     if (existing){
       const code = existing[0];
@@ -1262,5 +1261,6 @@ Return JSON:
 /* ====================== START ====================== */
 const port = process.env.PORT || 8080;
 app.listen(port, () => console.log(`HI-AI backend on :${port}`));
+
 
 
