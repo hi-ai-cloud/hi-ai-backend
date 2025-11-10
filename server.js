@@ -6,6 +6,10 @@ import cors from "cors";
 import fetch from "node-fetch";
 import OpenAI from "openai";
 import "dotenv/config";
+import os from "os";
+import { execFile } from "child_process";
+import { promisify } from "util";
+import ffmpegPath from "ffmpeg-static";
 
 // --- upload deps
 import multer from "multer";
@@ -48,7 +52,12 @@ function absUrl(req, p) {
   const base = absoluteOrigin(req);
   return `${base}${p.startsWith("/") ? "" : "/"}${p}`;
 }
-
+const execFileP = promisify(execFile);
+async function runFfmpeg(args = []) {
+  if (!ffmpegPath) throw new Error("ffmpeg binary not found (ffmpeg-static)");
+  const { stdout, stderr } = await execFileP(ffmpegPath, args, { maxBuffer: 1024 * 1024 * 8 });
+  return { stdout, stderr };
+}
 /* ====================== UTILITIES ====================== */
 const sleep = (ms) => new Promise((r) => setTimeout(r, ms));
 
@@ -1222,7 +1231,54 @@ Return JSON:
     res.status(500).json({ ok: false, error: String(e.message || e) });
   }
 });
+// ============ 2-SECOND VIDEO TRIM ============
+app.post("/api/video-2s", upload.single("file"), async (req, res) => {
+  try {
+    if (!req.file) return res.status(400).json({ ok: false, error: "no_file" });
 
+    // Имя файла и пути
+    const orig = (req.file.originalname || "video.mp4").replace(/\s+/g, "_");
+    const base = orig.replace(/\.[a-z0-9]+$/i, "") || "clip";
+    const tmpIn  = path.join(os.tmpdir(), `hi-ai_in_${Date.now()}.mp4`);
+    const tmpOut = path.join(os.tmpdir(), `hi-ai_out_${Date.now()}.mp4`);
+
+    // Пишем входной буфер во временный файл
+    fs.writeFileSync(tmpIn, req.file.buffer);
+
+    // Режем до 2.00 секунд, быстрый пресет, совместимый MP4
+    // (без изменения аспекта; movflags +faststart для web)
+    const ffArgs = [
+      "-y",
+      "-i", tmpIn,
+      "-t", "2",
+      "-movflags", "+faststart",
+      "-c:v", "libx264",
+      "-preset", "veryfast",
+      "-crf", "23",
+      "-pix_fmt", "yuv420p",
+      "-c:a", "aac",
+      "-b:a", "128k",
+      tmpOut
+    ];
+    await runFfmpeg(ffArgs);
+
+    // Переносим результат в /public/uploads
+    const outName = `${Date.now()}_${base}_2s.mp4`;
+    const finalPath = path.join(UPLOAD_DIR, outName);
+    fs.copyFileSync(tmpOut, finalPath);
+
+    // Убираем временные файлы
+    try { fs.unlinkSync(tmpIn); } catch {}
+    try { fs.unlinkSync(tmpOut); } catch {}
+
+    // Отдаём короткий абсолютный URL
+    return res.json({ ok: true, url: absUrl(req, `/uploads/${outName}`) });
+  } catch (e) {
+    console.error("VIDEO_2S_ERROR:", e);
+    return res.status(500).json({ ok: false, error: String(e.message || e) });
+  }
+});
 /* ====================== START ====================== */
 const port = process.env.PORT || 8080;
 app.listen(port, () => console.log(`HI-AI backend on :${port}`));
+
