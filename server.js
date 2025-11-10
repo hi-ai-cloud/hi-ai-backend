@@ -99,6 +99,7 @@ function makeDataUrlSafe(dataUrl) {
   }
   return s;
 }
+
 /* ====================== SHORT LINKS ( /api/shorten , /t/:code ) ====================== */
 
 const SHORT_DB = path.join(process.cwd(), "public", "short.json");
@@ -116,7 +117,14 @@ function saveShortDB(db){
     fs.writeFileSync(SHORT_DB, JSON.stringify(db, null, 2));
   } catch {}
 }
-function b62(n){ const a="0123456789abcdefghijklmnopqrstuvwxyzABCDEFGHIJKLMNOPQRSTUVWXYZ"; let s=""; do{ s=a[n%62]+s; n=Math.floor(n/62);}while(n>0); return s; }
+
+function b62(n){ 
+  const a="0123456789abcdefghijklmnopqrstuvwxyzABCDEFGHIJKLMNOPQRSTUVWXYZ"; 
+  let s=""; 
+  do { s=a[n%62]+s; n=Math.floor(n/62); } while(n>0); 
+  return s; 
+}
+
 function genCode(len){
   const L = Math.max(CODE_MIN, Math.min(CODE_MAX, len||4));
   let n = Math.floor(Math.random()*62**L);
@@ -130,13 +138,12 @@ app.post("/api/shorten", async (req, res) => {
     const url = String(body.url||"").trim();
     if(!url) return res.status(400).json({ ok:false, error:"missing url" });
 
-    // Безопасность: разрешим любые http(s), data: и ваши собственные страницы
+    // Безопасность: разрешим http(s) и data:
     if(!/^https?:\/\//i.test(url) && !/^data:/i.test(url)){
       return res.status(400).json({ ok:false, error:"bad url" });
     }
 
     const db = loadShortDB();
-    // idempotency: если уже есть — вернём существующую
     const existing = Object.entries(db.map).find(([,v]) => v.url === url);
     if (existing){
       const code = existing[0];
@@ -156,7 +163,6 @@ app.post("/api/shorten", async (req, res) => {
   }
 });
 
-// Инфо/резолв кода
 app.get("/api/shorten/:code", (req,res)=>{
   const db = loadShortDB();
   const r = db.map[req.params.code];
@@ -164,16 +170,15 @@ app.get("/api/shorten/:code", (req,res)=>{
   return res.json({ ok:true, code:req.params.code, ...r });
 });
 
-// “Голый” редирект
 app.get("/t/:code", (req,res)=>{
   const db = loadShortDB();
   const r = db.map[req.params.code];
   if(!r) return res.status(404).send("short link not found");
   r.hits = (r.hits||0)+1; saveShortDB(db);
-  // 302, чтобы можно было обновлять цель в будущем
   res.setHeader("Cache-Control","no-store");
   return res.redirect(302, r.url);
 });
+
 /* ====================== UPLOAD (form-data file) ====================== */
 const upload = multer({ storage: multer.memoryStorage() });
 
@@ -1257,4 +1262,5 @@ Return JSON:
 /* ====================== START ====================== */
 const port = process.env.PORT || 8080;
 app.listen(port, () => console.log(`HI-AI backend on :${port}`));
+
 
