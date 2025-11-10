@@ -1,16 +1,21 @@
 // HI-AI HUB — Unified Backend (Brand Post + Image Studio + Video Studio + Video Reels)  
 // Express + OpenAI + Replicate (polling, data:URL safe, model routing fixed for Replicate 2025)  
   
-import express from "express";  
-import cors from "cors";  
-import fetch from "node-fetch";  
-import OpenAI from "openai";  
-import "dotenv/config";  
-  
-// --- upload deps  
-import multer from "multer";  
-import path from "path";  
-import fs from "fs";  
+import express from "express";
+import cors from "cors";
+import fetch from "node-fetch";
+import OpenAI from "openai";
+import "dotenv/config";
+
+// --- ffmpeg (для 2-сек обрезки и водяного знака)
+import ffmpegPath from "ffmpeg-static";
+import ffmpeg from "fluent-ffmpeg";
+ffmpeg.setFfmpegPath(ffmpegPath);
+
+// --- upload deps
+import multer from "multer";
+import path from "path";
+import fs from "fs";
   
 const app = express();  
 app.set("trust proxy", true);  
@@ -115,6 +120,68 @@ app.post("/api/upload", upload.single("file"), async (req, res) => {
     return res.status(500).json({ error: "upload_failed" });  
   }  
 });  
+
+// --- POST /api/trim2s  -> вернёт mp4, обрезанное до 2.00s
+app.post("/api/trim2s", upload.single("file"), async (req, res) => {
+  try {
+    if (!req.file) return res.status(400).json({ ok:false, error:"no_file" });
+    const inName = `in_${Date.now()}.mp4`;
+    const outName = `out_${Date.now()}.mp4`;
+    const inPath = path.join(UPLOAD_DIR, inName);
+    const outPath = path.join(UPLOAD_DIR, outName);
+    fs.writeFileSync(inPath, req.file.buffer);
+    await new Promise((resolve, reject)=>{
+      ffmpeg(inPath)
+        .outputOptions(["-t 2.0", "-movflags +faststart", "-pix_fmt yuv420p", "-c:v libx264", "-preset veryfast", "-crf 22", "-an"])
+        .on("end", resolve).on("error", reject)
+        .save(outPath);
+    });
+    fs.unlink(inPath, ()=>{});
+    return res.json({ ok:true, url: absUrl(req, `/uploads/${outName}`) });
+  } catch(e){ return res.status(500).json({ ok:false, error:String(e.message||e) }); }
+});
+
+// --- POST /api/watermark-video  (text badge “HI-AI” низ-право)
+app.post("/api/watermark-video", upload.single("file"), async (req, res) => {
+  try {
+    const rawLabel = (req.body?.label || "HI-AI").toString();
+    const label = rawLabel.replace(/'/g, "\\'"); // безопасно для drawtext
+    if (!req.file) return res.status(400).json({ ok:false, error:"no_file" });
+
+    const inName = `wm_in_${Date.now()}.mp4`;
+    const outName = `wm_out_${Date.now()}.mp4`;
+    const inPath = path.join(UPLOAD_DIR, inName);
+    const outPath = path.join(UPLOAD_DIR, outName);
+    fs.writeFileSync(inPath, req.file.buffer);
+
+    // Без fontfile: ffmpeg возьмёт дефолтный шрифт. Размер от высоты кадра.
+    // tw/th считаются автоматически drawtext-ом.
+    const draw =
+      "drawbox=x=w-tw-30:y=h-th-30:w=tw+30:h=th+20:color=black@0.32:t=fill," +
+      `drawtext=text='${label}':fontsize=h*0.045:fontcolor=white:x=w-tw-20:y=h-th-40`;
+
+    await new Promise((resolve, reject) => {
+      ffmpeg(inPath)
+        .videoFilters(draw)
+        .outputOptions([
+          "-movflags +faststart",
+          "-pix_fmt yuv420p",
+          "-c:v libx264",
+          "-preset veryfast",
+          "-crf 22"
+        ])
+        .on("end", resolve)
+        .on("error", reject)
+        .save(outPath);
+    });
+
+    fs.unlink(inPath, () => {});
+    return res.json({ ok:true, url: absUrl(req, `/uploads/${outName}`) });
+  } catch (e) {
+    return res.status(500).json({ ok:false, error:String(e.message||e) });
+  }
+});
+
 /* ====================== SHORTENER ====================== */
 const SHORT_DB = path.join(UPLOAD_DIR, "short.json");
 let SHORT_MAP = {};
@@ -1146,3 +1213,4 @@ Return JSON:
 /* ====================== START ====================== */  
 const port = process.env.PORT || 8080;  
 app.listen(port, () => console.log(`HI-AI backend on :${port}`));  
+
