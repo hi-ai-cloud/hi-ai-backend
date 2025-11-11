@@ -108,7 +108,9 @@ function guardPaid(req, res, next) {
   const k = req.header("X-API-Key") || req.query.key || (req.body && req.body.api_key);
   if (k && k === process.env.PAYWALL_KEY) return next();
   return res.status(402).json({ ok:false, error:"payment_required", message:"Generation is available for paid users." });
-}
+} 
+// Проверка ключа: вернёт {ok:true}, если ключ верный
+app.get("/api/key-check", guardPaid, (req, res) => res.json({ ok: true }));
 
 // attach to generative endpoints
 app.use("/api/video-studio", guardPaid);
@@ -1103,4 +1105,5 @@ Return JSON:
 /* ====================== START ====================== */
 const PORT = process.env.PORT || 10000;
 app.listen(PORT, () => console.log(`HI-AI backend on :${PORT}`));
+
 
