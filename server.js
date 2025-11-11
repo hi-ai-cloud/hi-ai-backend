@@ -114,7 +114,14 @@ app.get("/api/key-check", guardPaid, (req, res) => res.json({ ok: true }));
 
 // attach to generative endpoints
 app.use("/api/video-studio", guardPaid);
-app.use("/api/image-studio", guardPaid);
+app.use("/api/image-studio", (req, res, next) => {
+  try {
+    const body = readBody(req.body);
+    const act = String(body?.action || "").toLowerCase();
+    if (act === "remove_bg") return next(); // ← free проход для remove_bg
+  } catch {}
+  return guardPaid(req, res, next);
+});
 app.use("/api/video-reels", guardPaid);
 
 /* ====================== HEALTH ====================== */
@@ -1105,5 +1112,6 @@ Return JSON:
 /* ====================== START ====================== */
 const PORT = process.env.PORT || 10000;
 app.listen(PORT, () => console.log(`HI-AI backend on :${PORT}`));
+
 
 
