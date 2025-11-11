@@ -16,25 +16,61 @@ ffmpeg.setFfmpegPath(ffmpegPath);
 import multer from "multer";
 import path from "path";
 import fs from "fs";
-  
+
 const app = express();  
 app.set("trust proxy", true);  
 app.use(cors());  
 app.use(express.json({ limit: "30mb" }));  
-  
-/* ====================== STATIC UPLOADS ====================== */  
-const UPLOAD_DIR = path.join(process.cwd(), "public", "uploads");  
-fs.mkdirSync(UPLOAD_DIR, { recursive: true });  
-  
-app.use(  
-  "/uploads",  
-  express.static(UPLOAD_DIR, {  
-    setHeaders: (res) => {  
-      res.setHeader("Access-Control-Allow-Origin", "*");  
-      res.setHeader("Cache-Control", "public, max-age=31536000, immutable");  
-    },  
-  })  
-);  
+
+// === PAYWALL + UPLOADS bootstrap (paste after app.use(express.json(...))) ===
+
+// 1) Лёгкий пэйволл: включается, если PAYWALL_ENABLED=true
+function guardPaid(req, res, next) {
+  if (String(process.env.PAYWALL_ENABLED) !== "true") return next();
+  const k =
+    req.header("X-API-Key") ||
+    req.query.key ||
+    (req.body && req.body.api_key);
+  if (k && k === process.env.PAYWALL_KEY) return next();
+  return res
+    .status(402)
+    .json({ ok: false, error: "payment_required", message: "Generation is available for paid users." });
+}
+
+// 2) Папка для загрузок + статика (оставь, если ещё не было настроено выше)
+const UPLOAD_DIR = path.join(process.cwd(), "public", "uploads");
+fs.mkdirSync(UPLOAD_DIR, { recursive: true });
+app.use("/uploads", express.static(UPLOAD_DIR, {
+  setHeaders: (res) => {
+    res.setHeader("Access-Control-Allow-Origin", "*");
+    res.setHeader("Cache-Control", "public, max-age=31536000, immutable");
+  }
+}));
+
+// 3) Multer (in-memory) для приёма файлов
+const upload = multer({ storage: multer.memoryStorage() });
+
+// 4) Включаем paywall для генеративных эндпоинтов БЕЗ правки их кода
+//    ⚠️ ВАЖНО: эти строки должны идти ПЕРЕД объявлениями соответствующих маршрутов.
+app.use("/api/video-studio", guardPaid);
+app.use("/api/image-studio", guardPaid);
+app.use("/api/video-reels", guardPaid);
+
+// 5) Если вдруг у тебя нет /api/upload — добавь (иначе пропусти этот блок)
+app.post("/api/upload", upload.single("file"), async (req, res) => {
+  try {
+    if (!req.file) return res.status(400).json({ error: "no_file" });
+    const safeName = (req.file.originalname || "file.bin").replace(/\s+/g, "_");
+    const name = `${Date.now()}_${safeName}`;
+    fs.writeFileSync(path.join(UPLOAD_DIR, name), req.file.buffer);
+    const origin = (req.headers["x-forwarded-proto"] || req.protocol || "https").toString().split(",")[0].trim()
+      + "://" + (req.headers["x-forwarded-host"] || req.headers.host);
+    return res.json({ url: `${origin}/uploads/${name}` });
+  } catch (e) {
+    console.error(e);
+    return res.status(500).json({ error: "upload_failed" });
+  }
+});
   
 /* ====================== ORIGIN HELPERS ====================== */  
 function absoluteOrigin(req) {  
@@ -1216,6 +1252,7 @@ Return JSON:
 /* ====================== START ====================== */  
 const port = process.env.PORT || 8080;  
 app.listen(port, () => console.log(`HI-AI backend on :${port}`));  
+
 
 
 
