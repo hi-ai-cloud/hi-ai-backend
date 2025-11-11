@@ -145,42 +145,40 @@ app.post("/api/trim2s", upload.single("file"), async (req, res) => {
 app.post("/api/watermark-video", upload.single("file"), async (req, res) => {
   try {
     const rawLabel = (req.body?.label || "HI-AI").toString();
-    const label = rawLabel.replace(/'/g, "\\'"); // безопасно для drawtext
-    if (!req.file) return res.status(400).json({ ok:false, error:"no_file" });
+const label = rawLabel.replace(/'/g, "\\'"); // безопасно для drawtext
+if (!req.file) return res.status(400).json({ ok:false, error:"no_file" });
 
-    const inName = `wm_in_${Date.now()}.mp4`;
-    const outName = `wm_out_${Date.now()}.mp4`;
-    const inPath = path.join(UPLOAD_DIR, inName);
-    const outPath = path.join(UPLOAD_DIR, outName);
-    fs.writeFileSync(inPath, req.file.buffer);
+const inName = `wm_in_${Date.now()}.mp4`;
+const outName = `wm_out_${Date.now()}.mp4`;
+const inPath = path.join(UPLOAD_DIR, inName);
+const outPath = path.join(UPLOAD_DIR, outName);
+fs.writeFileSync(inPath, req.file.buffer);
 
-    // Без fontfile: ffmpeg возьмёт дефолтный шрифт. Размер от высоты кадра.
-    // tw/th считаются автоматически drawtext-ом.
-    const draw =
-      "drawbox=x=w-tw-30:y=h-th-30:w=tw+30:h=th+20:color=black@0.32:t=fill," +
-      `drawtext=text='${label}':fontsize=h*0.045:fontcolor=white:x=w-tw-20:y=h-th-40`;
+// ✅ Новый фильтр — рисует белый текст с полупрозрачным фоном (виден на любом видео)
+const draw =
+  `drawtext=text='${label}':` +
+  `fontsize=h*0.05:` +                 // размер шрифта = 5% высоты
+  `fontcolor=white:` +                 // белый текст
+  `box=1:boxcolor=black@0.32:boxborderw=12:` + // чёрный полупрозрачный фон
+  `x=w-tw-24:y=h-th-24`;               // позиция: низ-право
 
-    await new Promise((resolve, reject) => {
-      ffmpeg(inPath)
-        .videoFilters(draw)
-        .outputOptions([
-          "-movflags +faststart",
-          "-pix_fmt yuv420p",
-          "-c:v libx264",
-          "-preset veryfast",
-          "-crf 22"
-        ])
-        .on("end", resolve)
-        .on("error", reject)
-        .save(outPath);
-    });
-
-    fs.unlink(inPath, () => {});
-    return res.json({ ok:true, url: absUrl(req, `/uploads/${outName}`) });
-  } catch (e) {
-    return res.status(500).json({ ok:false, error:String(e.message||e) });
-  }
+await new Promise((resolve, reject) => {
+  ffmpeg(inPath)
+    .videoFilters(draw)
+    .outputOptions([
+      "-movflags +faststart",
+      "-pix_fmt yuv420p",
+      "-c:v libx264",
+      "-preset veryfast",
+      "-crf 22"
+    ])
+    .on("end", resolve)
+    .on("error", reject)
+    .save(outPath);
 });
+
+fs.unlink(inPath, () => {});
+return res.json({ ok:true, url: absUrl(req, `/uploads/${outName}`) });
 
 /* ====================== SHORTENER ====================== */
 const SHORT_DB = path.join(UPLOAD_DIR, "short.json");
@@ -1213,4 +1211,5 @@ Return JSON:
 /* ====================== START ====================== */  
 const port = process.env.PORT || 8080;  
 app.listen(port, () => console.log(`HI-AI backend on :${port}`));  
+
 
