@@ -141,15 +141,13 @@ app.post("/api/trim2s", upload.single("file"), async (req, res) => {
   } catch(e){ return res.status(500).json({ ok:false, error:String(e.message||e) }); }
 });
 
-// --- POST /api/watermark-video  (text badge “HI-AI” bottom-right)
+// --- POST /api/watermark-video  (аккуратный адаптивный бейдж “HI-AI” внизу справа)
 app.post("/api/watermark-video", upload.single("file"), async (req, res) => {
   try {
     const rawLabel = (req.body?.label || "HI-AI").toString();
-    // экранируем кавычки и двоеточия для ffmpeg drawtext
-    const esc = (s) => s.replace(/['\\:]/g, (m) => (m === ":" ? "\\:" : "\\" + m));
-    const label = esc(rawLabel);
-
-    if (!req.file) return res.status(400).json({ ok: false, error: "no_file" });
+    const label = rawLabel.replace(/'/g, "\\'");
+    const SCALE = Math.min(Math.max(parseFloat(req.body?.scale || "1.0"), 0.5), 2.0); // 0.5–2.0
+    if (!req.file) return res.status(400).json({ ok:false, error:"no_file" });
 
     const inName = `wm_in_${Date.now()}.mp4`;
     const outName = `wm_out_${Date.now()}.mp4`;
@@ -157,14 +155,12 @@ app.post("/api/watermark-video", upload.single("file"), async (req, res) => {
     const outPath = path.join(UPLOAD_DIR, outName);
     fs.writeFileSync(inPath, req.file.buffer);
 
-    // Чёткий белый текст с полупрозрачным чёрным боксом, низ-право
+    // Бейдж: небольшой, с отступами; размер шрифта ~3.2% от высоты (умножаем на SCALE)
     const draw =
-      "drawtext=" +
-      "text='" + label + "':" +
-      "fontsize=h*0.05:" +
-      "fontcolor=white:" +
-      "box=1:boxcolor=black@0.32:boxborderw=12:" +
-      "x=w-tw-24:y=h-th-24";
+      `drawtext=text='${label}':` +
+      `fontsize=h*0.032*${SCALE}:fontcolor=white:` +
+      `box=1:boxcolor=black@0.30:boxborderw=10*${SCALE}:` +
+      `x=w-tw-18*${SCALE}:y=h-th-18*${SCALE}`;
 
     await new Promise((resolve, reject) => {
       ffmpeg(inPath)
@@ -182,9 +178,9 @@ app.post("/api/watermark-video", upload.single("file"), async (req, res) => {
     });
 
     fs.unlink(inPath, () => {});
-    return res.json({ ok: true, url: absUrl(req, `/uploads/${outName}`) });
+    return res.json({ ok:true, url: absUrl(req, `/uploads/${outName}`) });
   } catch (e) {
-    return res.status(500).json({ ok: false, error: String(e.message || e) });
+    return res.status(500).json({ ok:false, error:String(e.message||e) });
   }
 });
 
@@ -1220,6 +1216,7 @@ Return JSON:
 /* ====================== START ====================== */  
 const port = process.env.PORT || 8080;  
 app.listen(port, () => console.log(`HI-AI backend on :${port}`));  
+
 
 
 
