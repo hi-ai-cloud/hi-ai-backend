@@ -167,18 +167,57 @@ app.post("/api/trim2s", upload.single("file"), async (req, res) => {
   }
 });
 
-/* ====================== WATERMARK (compact badge) ====================== */
-// label, pos: rb|lb|rt|lt, pad(px), alpha(0..1), scale(0.5..2.0)
-app.post("/api/watermark-video", upload.single("file"), async (req, res) => {
+// --- POST /api/zoom2s  (плавный зум 1.0 -> factor за 2.0s)
+app.post("/api/zoom2s", upload.single("file"), async (req, res) => {
   try {
     if (!req.file) return res.status(400).json({ ok:false, error:"no_file" });
+    const factor = Math.min(Math.max(parseFloat(req.body?.factor || "1.3"), 1.0), 2.0); // 1.0–2.0
+    const fps = Math.min(Math.max(parseInt(req.body?.fps || "30",10), 15), 60); // 15–60
+    const frames = 2 * fps;               // 2 секунды
+    const step = (factor - 1.0) / frames; // приращение масштаба на кадр
 
+    const inName = `zin_${Date.now()}.mp4`;
+    const outName = `zout_${Date.now()}.mp4`;
+    const inPath = path.join(UPLOAD_DIR, inName);
+    const outPath = path.join(UPLOAD_DIR, outName);
+    fs.writeFileSync(inPath, req.file.buffer);
+
+    // zoompan с плавным инкрементом
+    // z=min(1.0+on*step, factor), d=1 кадр, fps фиксируем, итог — ровно 2s
+    const filter = `fps=${fps},scale=iw:ih,` +
+                   `zoompan=z='min(1.0+on*${step.toFixed(6)},${factor})':d=1:s=iwxih:fps=${fps}`;
+
+    await new Promise((resolve, reject) => {
+      ffmpeg(inPath)
+        .videoFilters(filter)
+        .outputOptions([
+          "-t 2.0",
+          "-movflags +faststart",
+          "-pix_fmt yuv420p",
+          "-c:v libx264",
+          "-preset veryfast",
+          "-crf 22",
+          "-an"
+        ])
+        .on("end", resolve)
+        .on("error", reject)
+        .save(outPath);
+    });
+
+    fs.unlink(inPath, ()=>{});
+    return res.json({ ok:true, url: absUrl(req, `/uploads/${outName}`) });
+  } catch (e) {
+    return res.status(500).json({ ok:false, error:String(e.message||e) });
+  }
+});
+
+// --- POST /api/watermark-video  (аккуратный бейдж “HI-AI” справа-снизу)
+app.post("/api/watermark-video", upload.single("file"), async (req, res) => {
+  try {
     const rawLabel = (req.body?.label || "HI-AI").toString();
     const label = rawLabel.replace(/'/g, "\\'");
-    const pos = String(req.body?.pos || "rb");
-    const pad = Math.max(0, Number(req.body?.pad ?? 24));
-    const alpha = Math.min(1, Math.max(0, Number(req.body?.alpha ?? 0.28)));
-    const scale = Math.min(2.0, Math.max(0.5, Number(req.body?.scale ?? 1.0)));
+    const SCALE = Math.min(Math.max(parseFloat(req.body?.scale || "1.0"), 0.5), 2.0); // 0.5–2.0
+    if (!req.file) return res.status(400).json({ ok:false, error:"no_file" });
 
     const inName = `wm_in_${Date.now()}.mp4`;
     const outName = `wm_out_${Date.now()}.mp4`;
@@ -186,32 +225,35 @@ app.post("/api/watermark-video", upload.single("file"), async (req, res) => {
     const outPath = path.join(UPLOAD_DIR, outName);
     fs.writeFileSync(inPath, req.file.buffer);
 
-    const anchor = (() => {
-      switch (pos) {
-        case "lb": return { xBox: pad, yBox: `h-th-${pad}`, xText: pad + 10, yText: `h-10-${pad}` };
-        case "rt": return { xBox: `w-tw-${pad}`, yBox: pad, xText: `w-tw+10-${pad}`, yText: 10 + pad };
-        case "lt": return { xBox: pad, yBox: pad, xText: pad + 10, yText: 10 + pad };
-        case "rb":
-        default:   return { xBox: `w-tw-${pad}`, yBox: `h-th-${pad}`, xText: `w-tw+10-${pad}`, yText: `h-10-${pad}` };
-      }
-    })();
+    // пытаемся использовать системный шрифт; если его нет — рисуем без fontfile
+    const FONT = "/usr/share/fonts/truetype/dejavu/DejaVuSans-Bold.ttf";
+    const haveFont = fs.existsSync(FONT);
 
     const draw =
-      `drawbox=x=${anchor.xBox}:y=${anchor.yBox}:w=tw+20:h=th+18:color=black@${alpha}:t=fill,` +
-      `drawtext=text='${label}':fontsize=h*0.03*${scale}:fontcolor=white:x=${anchor.xText}:y=${anchor.yText}`;
+      (haveFont ? `drawtext=fontfile=${FONT}:` : "drawtext:") +
+      `text='${label}':fontsize=h*0.026*${SCALE}:fontcolor=white:` +
+      `box=1:boxcolor=black@0.30:boxborderw=6*${SCALE}:` +
+      `x=w-tw-14*${SCALE}:y=h-th-14*${SCALE}`;
 
     await new Promise((resolve, reject) => {
       ffmpeg(inPath)
         .videoFilters(draw)
-        .outputOptions(["-movflags +faststart","-pix_fmt yuv420p","-c:v libx264","-preset veryfast","-crf 22"])
-        .on("end", resolve).on("error", reject)
+        .outputOptions([
+          "-movflags +faststart",
+          "-pix_fmt yuv420p",
+          "-c:v libx264",
+          "-preset veryfast",
+          "-crf 22",
+          "-an"
+        ])
+        .on("end", resolve)
+        .on("error", reject)
         .save(outPath);
     });
 
     fs.unlink(inPath, () => {});
     return res.json({ ok:true, url: absUrl(req, `/uploads/${outName}`) });
   } catch (e) {
-    console.error(e);
     return res.status(500).json({ ok:false, error:String(e.message||e) });
   }
 });
@@ -1061,3 +1103,4 @@ Return JSON:
 /* ====================== START ====================== */
 const PORT = process.env.PORT || 10000;
 app.listen(PORT, () => console.log(`HI-AI backend on :${PORT}`));
+
