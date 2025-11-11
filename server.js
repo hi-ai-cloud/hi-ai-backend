@@ -141,46 +141,55 @@ app.post("/api/trim2s", upload.single("file"), async (req, res) => {
   } catch(e){ return res.status(500).json({ ok:false, error:String(e.message||e) }); }
 });
 
-// --- POST /api/watermark-video  (text badge “HI-AI” низ-право)
+// --- POST /api/watermark-video  (text badge “HI-AI” bottom-right)
 app.post("/api/watermark-video", upload.single("file"), async (req, res) => {
   try {
     const rawLabel = (req.body?.label || "HI-AI").toString();
-const label = rawLabel.replace(/'/g, "\\'"); // безопасно для drawtext
-if (!req.file) return res.status(400).json({ ok:false, error:"no_file" });
+    // экранируем кавычки и двоеточия для ffmpeg drawtext
+    const esc = (s) => s.replace(/['\\:]/g, (m) => (m === ":" ? "\\:" : "\\" + m));
+    const label = esc(rawLabel);
 
-const inName = `wm_in_${Date.now()}.mp4`;
-const outName = `wm_out_${Date.now()}.mp4`;
-const inPath = path.join(UPLOAD_DIR, inName);
-const outPath = path.join(UPLOAD_DIR, outName);
-fs.writeFileSync(inPath, req.file.buffer);
+    if (!req.file) return res.status(400).json({ ok: false, error: "no_file" });
 
-// ✅ Новый фильтр — рисует белый текст с полупрозрачным фоном (виден на любом видео)
-const draw =
-  `drawtext=text='${label}':` +
-  `fontsize=h*0.05:` +                 // размер шрифта = 5% высоты
-  `fontcolor=white:` +                 // белый текст
-  `box=1:boxcolor=black@0.32:boxborderw=12:` + // чёрный полупрозрачный фон
-  `x=w-tw-24:y=h-th-24`;               // позиция: низ-право
+    const inName = `wm_in_${Date.now()}.mp4`;
+    const outName = `wm_out_${Date.now()}.mp4`;
+    const inPath = path.join(UPLOAD_DIR, inName);
+    const outPath = path.join(UPLOAD_DIR, outName);
+    fs.writeFileSync(inPath, req.file.buffer);
 
-await new Promise((resolve, reject) => {
-  ffmpeg(inPath)
-    .videoFilters(draw)
-    .outputOptions([
-      "-movflags +faststart",
-      "-pix_fmt yuv420p",
-      "-c:v libx264",
-      "-preset veryfast",
-      "-crf 22"
-    ])
-    .on("end", resolve)
-    .on("error", reject)
-    .save(outPath);
+    // Чёткий белый текст с полупрозрачным чёрным боксом, низ-право
+    const draw =
+      "drawtext=" +
+      "text='" + label + "':" +
+      "fontsize=h*0.05:" +
+      "fontcolor=white:" +
+      "box=1:boxcolor=black@0.32:boxborderw=12:" +
+      "x=w-tw-24:y=h-th-24";
+
+    await new Promise((resolve, reject) => {
+      ffmpeg(inPath)
+        .videoFilters(draw)
+        .outputOptions([
+          "-movflags +faststart",
+          "-pix_fmt yuv420p",
+          "-c:v libx264",
+          "-preset veryfast",
+          "-crf 22"
+        ])
+        .on("end", resolve)
+        .on("error", reject)
+        .save(outPath);
+    });
+
+    fs.unlink(inPath, () => {});
+    return res.json({ ok: true, url: absUrl(req, `/uploads/${outName}`) });
+  } catch (e) {
+    return res.status(500).json({ ok: false, error: String(e.message || e) });
+  }
 });
 
-fs.unlink(inPath, () => {});
-return res.json({ ok:true, url: absUrl(req, `/uploads/${outName}`) });
-
 /* ====================== SHORTENER ====================== */
+
 const SHORT_DB = path.join(UPLOAD_DIR, "short.json");
 let SHORT_MAP = {};
 try { SHORT_MAP = JSON.parse(fs.readFileSync(SHORT_DB, "utf8")); } catch {}
@@ -1211,5 +1220,6 @@ Return JSON:
 /* ====================== START ====================== */  
 const port = process.env.PORT || 8080;  
 app.listen(port, () => console.log(`HI-AI backend on :${port}`));  
+
 
 
