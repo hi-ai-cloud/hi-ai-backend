@@ -33,13 +33,25 @@ const H264_60FPS_OPTS = [
 const app = express();
 app.set("trust proxy", true);
 
-// CORS + preflight (разрешаем X-API-Key и OPTIONS)
+// CORS + preflight + health
+import cors from "cors";
 app.use(cors({
   origin: true,
   methods: ["GET","POST","OPTIONS"],
   allowedHeaders: ["Content-Type","X-API-Key","Accept"]
 }));
-app.options("*", (req,res)=>res.sendStatus(204));
+app.options("*", cors());
+
+app.get("/api/health", (req,res)=>{
+  res.set("cache-control","no-store");
+  res.json({ ok:true, ts:Date.now() });
+});
+
+// лог запросов
+app.use((req,res,next)=>{
+  console.log(new Date().toISOString(), req.method, req.url);
+  next();
+});
 
 app.use(express.json({ limit: "30mb" }));
 
@@ -1158,6 +1170,7 @@ Return JSON:
 /* ====================== START ====================== */
 const PORT = process.env.PORT || 10000;
 app.listen(PORT, () => console.log(`HI-AI backend on :${PORT}`));
+
 
 
 
