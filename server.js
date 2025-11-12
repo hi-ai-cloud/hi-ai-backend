@@ -176,14 +176,59 @@ app.post("/api/trim2s", upload.single("file"), async (req, res) => {
   }
 });
 
-/* ZOOM2S START */
+/* TRIM2_5 START — обрезка до 2.50s, 1080x1920 @ 60fps */
+app.post("/api/trim25", upload.single("file"), async (req, res) => {
+  try {
+    if (!req.file) return res.status(400).json({ ok:false, error:"no_file" });
+
+    const fpsOut = 60;
+    const dur = 2.50;
+
+    const inName  = "tin_"  + Date.now() + ".mp4";
+    const outName = "tout_" + Date.now() + ".mp4";
+    const inPath  = path.join(UPLOAD_DIR, inName);
+    const outPath = path.join(UPLOAD_DIR, outName);
+    fs.writeFileSync(inPath, req.file.buffer);
+
+    await new Promise((resolve, reject) => {
+      ffmpeg(inPath)
+        .videoFilters([`scale=1080:1920`, `fps=${fpsOut}`])
+        .outputOptions([
+          `-t ${dur}`,
+          "-movflags +faststart",
+          "-pix_fmt yuv420p",
+          "-c:v libx264",
+          "-preset veryfast",
+          "-crf 20",
+          "-vsync cfr",
+          `-r ${fpsOut}`,
+          "-profile:v high",
+          "-level 4.2",
+          "-an"
+        ])
+        .on("end", resolve)
+        .on("error", reject)
+        .save(outPath);
+    });
+
+    fs.unlink(inPath, () => {});
+    return res.json({ ok:true, url: absUrl(req, `/uploads/${outName}`) });
+  } catch (e) {
+    return res.status(500).json({ ok:false, error:String(e.message||e) });
+  }
+});
+/* TRIM2_5 END */
+
+/* ZOOM2S START — 1080x1920 @ target FPS, duration passthrough */
 app.post("/api/zoom2s", upload.single("file"), async (req, res) => {
   try {
     if (!req.file) return res.status(400).json({ ok:false, error:"no_file" });
 
-    const factor   = Math.min(Math.max(parseFloat(req.body?.factor || "1.35"), 1.0), 2.0);
-    const fpsOut   = Math.min(Math.max(parseInt(req.body?.fps || "60", 10), 24), 60);
-    const dur      = Math.min(Math.max(parseFloat(req.body?.duration || "2.5"), 1.0), 10.0);
+    const clamp = (v, lo, hi) => Math.min(Math.max(v, lo), hi);
+
+    const factor   = clamp(parseFloat(req.body?.factor || "1.35"), 1.0, 3.0);
+    const fpsOut   = Math.round(clamp(parseInt(req.body?.fps || "60", 10) || 60, 24, 120));
+    const dur      = clamp(parseFloat(req.body?.duration || "2.50"), 0.50, 30.0); // ← 2.50 по умолчанию
     const panX     = parseFloat(req.body?.pan_x ?? "-220");
     const panY     = parseFloat(req.body?.pan_y ?? "-260");
     const easing   = String(req.body?.easing || "easeInOutCubic").toLowerCase();
@@ -194,17 +239,17 @@ app.post("/api/zoom2s", upload.single("file"), async (req, res) => {
 
     let easeExpr;
     switch (easing) {
-      case "easein":      easeExpr = "pow(" + tExpr + ",3)"; break;
-      case "easeout":     easeExpr = "1 - pow(1-" + tExpr + ",3)"; break;
-      case "easeinsine":  easeExpr = "1 - cos(" + tExpr + "*PI/2)"; break;
-      case "easeoutsine": easeExpr = "sin(" + tExpr + "*PI/2)"; break;
+      case "easein":      easeExpr = `pow(${tExpr},3)`; break;
+      case "easeout":     easeExpr = `1 - pow(1-${tExpr},3)`; break;
+      case "easeinsine":  easeExpr = `1 - cos(${tExpr}*PI/2)`; break;
+      case "easeoutsine": easeExpr = `sin(${tExpr}*PI/2)`; break;
       case "linear":      easeExpr = tExpr; break;
-      default:            easeExpr = "if(lt(" + tExpr + ",0.5), 4*" + tExpr + "*" + tExpr + "*" + tExpr + ", 1 - pow(-2*" + tExpr + "+2,3)/2)";
+      default:            easeExpr = `if(lt(${tExpr},0.5), 4*${tExpr}*${tExpr}*${tExpr}, 1 - pow(-2*${tExpr}+2,3)/2)`;
     }
 
-    const zExpr = "1.0 + (" + easeExpr + ")*(" + factor.toFixed(6) + "-1.0)";
-    const xExpr = "(iw - iw/zoom)/2 + (" + easeExpr + ")*(" + panX.toFixed(6) + ")";
-    const yExpr = "(ih - ih/zoom)/2 + (" + easeExpr + ")*(" + panY.toFixed(6) + ")";
+    const zExpr = `1.0 + (${easeExpr})*(${factor.toFixed(6)}-1.0)`;
+    const xExpr = `(iw - iw/zoom)/2 + (${easeExpr})*(${panX.toFixed(6)})`;
+    const yExpr = `(ih - ih/zoom)/2 + (${easeExpr})*(${panY.toFixed(6)})`;
 
     const inName  = "zin_"  + Date.now() + ".mp4";
     const outName = "zout_" + Date.now() + ".mp4";
@@ -212,23 +257,28 @@ app.post("/api/zoom2s", upload.single("file"), async (req, res) => {
     const outPath = path.join(UPLOAD_DIR, outName);
     fs.writeFileSync(inPath, req.file.buffer);
 
+    // Жёстко выводим 1080x1920 + целевой FPS в графе и контейнере
     const filters = [
       "scale=iw:ih",
-      "zoompan=z='" + zExpr + "':x='" + xExpr + "':y='" + yExpr + "':d=1:s=iwxih:fps=" + fpsOut,
+      `zoompan=z='${zExpr}':x='${xExpr}':y='${yExpr}':d=1:s=1080x1920:fps=${fpsOut}`,
       wantBlur ? "tmix=frames=2:weights=1 1" : null,
-      "fps=" + fpsOut
+      `fps=${fpsOut}`
     ].filter(Boolean).join(",");
 
     await new Promise((resolve, reject) => {
       ffmpeg(inPath)
         .videoFilters(filters)
         .outputOptions([
-          "-t " + dur,
+          `-t ${dur}`,            // ← длительность из запроса (например, 2.5)
           "-movflags +faststart",
           "-pix_fmt yuv420p",
           "-c:v libx264",
           "-preset veryfast",
-          "-crf 22",
+          "-crf 20",              // качество повыше, чем 22
+          "-vsync cfr",           // стабилизируем FPS
+          `-r ${fpsOut}`,         // форсим частоту кадров в контейнере
+          "-profile:v high",
+          "-level 4.2",
           "-an"
         ])
         .on("end", resolve)
@@ -237,7 +287,7 @@ app.post("/api/zoom2s", upload.single("file"), async (req, res) => {
     });
 
     fs.unlink(inPath, () => {});
-    return res.json({ ok:true, url: absUrl(req, "/uploads/" + outName) });
+    return res.json({ ok:true, url: absUrl(req, `/uploads/${outName}`) });
   } catch (e) {
     return res.status(500).json({ ok:false, error:String(e.message||e) });
   }
@@ -1136,6 +1186,7 @@ Return JSON:
 /* ====================== START ====================== */
 const PORT = process.env.PORT || 10000;
 app.listen(PORT, () => console.log(`HI-AI backend on :${PORT}`));
+
 
 
 
