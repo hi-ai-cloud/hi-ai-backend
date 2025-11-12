@@ -7,19 +7,20 @@ import fetch from "node-fetch";
 import OpenAI from "openai";
 import "dotenv/config";
 
+// --- ffmpeg (trim/zoom/watermark)
 import ffmpegPath from "ffmpeg-static";
 import ffmpeg from "fluent-ffmpeg";
 ffmpeg.setFfmpegPath(ffmpegPath);
 
-// uploads (ЕДИНСТВЕННЫЙ upload!)
+// --- uploads
 import multer from "multer";
-import fs from "fs";
 import path from "path";
+import fs from "fs";
 
 const app = express();
 app.set("trust proxy", true);
 
-// CORS + preflight
+// CORS + preflight (разрешаем X-API-Key и OPTIONS)
 app.use(cors({
   origin: true,
   methods: ["GET","POST","OPTIONS"],
@@ -27,25 +28,7 @@ app.use(cors({
 }));
 app.options("*", (req,res)=>res.sendStatus(204));
 
-// body
 app.use(express.json({ limit: "30mb" }));
-
-// uploads dir + единый upload
-const UPLOAD_DIR = path.join(process.cwd(), "uploads");
-if (!fs.existsSync(UPLOAD_DIR)) fs.mkdirSync(UPLOAD_DIR, { recursive: true });
-const upload = multer({ storage: multer.memoryStorage(), limits: { fileSize: 100 * 1024 * 1024 } });
-
-// healthchecks
-app.get("/api/ping", (req,res)=>{
-  res.set("access-control-allow-origin","*");
-  res.set("cache-control","no-store");
-  res.json({ ok:true, pong:true, ts: Date.now() });
-});
-app.get("/api/health", (req,res)=>{
-  res.set("access-control-allow-origin","*");
-  res.set("cache-control","no-store");
-  res.json({ ok:true, status:"up", ts: Date.now() });
-});
 
 /* ====================== ORIGIN HELPERS ====================== */
 function absoluteOrigin(req) {
@@ -70,11 +53,10 @@ app.use("/uploads", express.static(UPLOAD_DIR, {
   }
 }));
 
-const upload = multer({ storage: multer.memoryStorage() });
+const upload = multer({ storage: multer.memoryStorage(), limits:{ fileSize: 100 * 1024 * 1024 }});
 
 /* ====================== UTILS ====================== */
 const sleep = (ms) => new Promise((r) => setTimeout(r, ms));
-
 async function fetchJson(url, opts = {}) {
   const res = await fetch(url, opts);
   if (!res.ok) {
@@ -89,9 +71,7 @@ async function fetchJson(url, opts = {}) {
 function readBody(raw) {
   if (!raw) return {};
   if (typeof raw === "object") return raw;
-  if (typeof raw === "string") {
-    try { return JSON.parse(raw); } catch { return {}; }
-  }
+  if (typeof raw === "string") { try { return JSON.parse(raw); } catch { return {}; } }
   return {};
 }
 function okUrl(v) { return typeof v === "string" && /^https?:\/\//i.test(v); }
@@ -127,31 +107,30 @@ function makeDataUrlSafe(dataUrl) {
 }
 
 /* ====================== PAYWALL ====================== */
-// Enable with: PAYWALL_ENABLED=true, PAYWALL_KEY=YOUR_SECRET
 function guardPaid(req, res, next) {
   if (String(process.env.PAYWALL_ENABLED) !== "true") return next();
   const k = req.header("X-API-Key") || req.query.key || (req.body && req.body.api_key);
   if (k && k === process.env.PAYWALL_KEY) return next();
   return res.status(402).json({ ok:false, error:"payment_required", message:"Generation is available for paid users." });
-} 
-// Проверка ключа: вернёт {ok:true}, если ключ верный
+}
 app.get("/api/key-check", guardPaid, (req, res) => res.json({ ok: true }));
-
-// attach to generative endpoints
 app.use("/api/video-studio", guardPaid);
-app.use("/api/image-studio", (req, res, next) => {
-  try {
-    const body = readBody(req.body);
-    const act = String(body?.action || "").toLowerCase();
-    if (act === "remove_bg") return next(); // ← free проход для remove_bg
-  } catch {}
-  return guardPaid(req, res, next);
-});
+app.use("/api/image-studio", guardPaid);
 app.use("/api/video-reels", guardPaid);
 
 /* ====================== HEALTH ====================== */
-app.get("/health", (_, res) => res.json({ ok: true, ts: Date.now() }));
-app.get("/env-check", (_, res) => {
+app.get("/api/ping", (_req,res)=>{ // фронт ждёт именно этот путь
+  res.set("access-control-allow-origin","*");
+  res.set("cache-control","no-store");
+  res.json({ ok:true, pong:true, ts: Date.now() });
+});
+app.get("/api/health", (_req,res)=>{
+  res.set("access-control-allow-origin","*");
+  res.set("cache-control","no-store");
+  res.json({ ok:true, status:"up", ts: Date.now() });
+});
+app.get("/health", (_req,res)=>res.json({ ok:true, ts: Date.now() }));
+app.get("/env-check", (_req, res) => {
   res.json({
     REPLICATE_API_TOKEN: !!process.env.REPLICATE_API_TOKEN,
     OPENAI_API_KEY: !!process.env.OPENAI_API_KEY,
@@ -178,7 +157,7 @@ app.post("/api/upload", upload.single("file"), async (req, res) => {
   }
 });
 
-/* ====================== TRIM 2s ====================== */
+/* ====================== TRIM 2s / 2.5s ====================== */
 app.post("/api/trim2s", upload.single("file"), async (req, res) => {
   try {
     if (!req.file) return res.status(400).json({ ok:false, error:"no_file" });
@@ -200,110 +179,63 @@ app.post("/api/trim2s", upload.single("file"), async (req, res) => {
     return res.status(500).json({ ok:false, error:String(e.message||e) });
   }
 });
-
-/* TRIM2_5 START — обрезка до 2.50s, 1080x1920 @ 60fps */
+// alias под фронтовый TRIM:'/api/trim25' (ровно 2.5s)
 app.post("/api/trim25", upload.single("file"), async (req, res) => {
   try {
     if (!req.file) return res.status(400).json({ ok:false, error:"no_file" });
-
-    const fpsOut = 60;
-    const dur = 2.50;
-
-    const inName  = "tin_"  + Date.now() + ".mp4";
-    const outName = "tout_" + Date.now() + ".mp4";
-    const inPath  = path.join(UPLOAD_DIR, inName);
+    const inName = `t25_in_${Date.now()}.mp4`;
+    const outName = `t25_out_${Date.now()}.mp4`;
+    const inPath = path.join(UPLOAD_DIR, inName);
     const outPath = path.join(UPLOAD_DIR, outName);
     fs.writeFileSync(inPath, req.file.buffer);
-
-    await new Promise((resolve, reject) => {
+    await new Promise((resolve, reject)=>{
       ffmpeg(inPath)
-        .videoFilters([`scale=1080:1920`, `fps=${fpsOut}`])
-        .outputOptions([
-          `-t ${dur}`,
-          "-movflags +faststart",
-          "-pix_fmt yuv420p",
-          "-c:v libx264",
-          "-preset veryfast",
-          "-crf 20",
-          "-vsync cfr",
-          `-r ${fpsOut}`,
-          "-profile:v high",
-          "-level 4.2",
-          "-an"
-        ])
-        .on("end", resolve)
-        .on("error", reject)
+        .outputOptions(["-t 2.5","-r 60","-movflags +faststart","-pix_fmt yuv420p","-c:v libx264","-preset veryfast","-crf 22","-an"])
+        .on("end", resolve).on("error", reject)
         .save(outPath);
     });
-
-    fs.unlink(inPath, () => {});
+    fs.unlink(inPath, ()=>{});
     return res.json({ ok:true, url: absUrl(req, `/uploads/${outName}`) });
-  } catch (e) {
+  } catch(e){
+    console.error(e);
     return res.status(500).json({ ok:false, error:String(e.message||e) });
   }
 });
-/* TRIM2_5 END */
 
-/* ZOOM2S START — 1080x1920 @ target FPS, duration passthrough */
+/* ====================== ZOOM  (duration/fps/factor) ====================== */
+// принимает duration(1–5), fps(15–60), factor(1.0–2.0)
 app.post("/api/zoom2s", upload.single("file"), async (req, res) => {
   try {
     if (!req.file) return res.status(400).json({ ok:false, error:"no_file" });
+    const duration = Math.min(Math.max(parseFloat(req.body?.duration || "2.0"), 1.0), 5.0);
+    const fps = Math.min(Math.max(parseInt(req.body?.fps || "30",10), 15), 60);
+    const factor = Math.min(Math.max(parseFloat(req.body?.factor || "1.3"), 1.0), 2.0);
+    const frames = Math.round(duration * fps);
+    const step = (factor - 1.0) / frames;
 
-    const clamp = (v, lo, hi) => Math.min(Math.max(v, lo), hi);
-
-    const factor   = clamp(parseFloat(req.body?.factor || "1.35"), 1.0, 3.0);
-    const fpsOut   = Math.round(clamp(parseInt(req.body?.fps || "60", 10) || 60, 24, 120));
-    const dur      = clamp(parseFloat(req.body?.duration || "2.50"), 0.50, 30.0); // ← 2.50 по умолчанию
-    const panX     = parseFloat(req.body?.pan_x ?? "-220");
-    const panY     = parseFloat(req.body?.pan_y ?? "-260");
-    const easing   = String(req.body?.easing || "easeInOutCubic").toLowerCase();
-    const wantBlur = String(req.body?.motion_blur || "1") === "1";
-
-    const frames = Math.max(2, Math.round(dur * fpsOut));
-    const tExpr  = "on/" + String(frames - 1);
-
-    let easeExpr;
-    switch (easing) {
-      case "easein":      easeExpr = `pow(${tExpr},3)`; break;
-      case "easeout":     easeExpr = `1 - pow(1-${tExpr},3)`; break;
-      case "easeinsine":  easeExpr = `1 - cos(${tExpr}*PI/2)`; break;
-      case "easeoutsine": easeExpr = `sin(${tExpr}*PI/2)`; break;
-      case "linear":      easeExpr = tExpr; break;
-      default:            easeExpr = `if(lt(${tExpr},0.5), 4*${tExpr}*${tExpr}*${tExpr}, 1 - pow(-2*${tExpr}+2,3)/2)`;
-    }
-
-    const zExpr = `1.0 + (${easeExpr})*(${factor.toFixed(6)}-1.0)`;
-    const xExpr = `(iw - iw/zoom)/2 + (${easeExpr})*(${panX.toFixed(6)})`;
-    const yExpr = `(ih - ih/zoom)/2 + (${easeExpr})*(${panY.toFixed(6)})`;
-
-    const inName  = "zin_"  + Date.now() + ".mp4";
-    const outName = "zout_" + Date.now() + ".mp4";
-    const inPath  = path.join(UPLOAD_DIR, inName);
+    const inName = `zin_${Date.now()}.mp4`;
+    const outName = `zout_${Date.now()}.mp4`;
+    const inPath = path.join(UPLOAD_DIR, inName);
     const outPath = path.join(UPLOAD_DIR, outName);
     fs.writeFileSync(inPath, req.file.buffer);
 
-    // Жёстко выводим 1080x1920 + целевой FPS в графе и контейнере
-    const filters = [
-      "scale=iw:ih",
-      `zoompan=z='${zExpr}':x='${xExpr}':y='${yExpr}':d=1:s=1080x1920:fps=${fpsOut}`,
-      wantBlur ? "tmix=frames=2:weights=1 1" : null,
-      `fps=${fpsOut}`
-    ].filter(Boolean).join(",");
+    // zoompan: s=iw:ih (исправлено), fps фиксируем, длина = duration
+    const filter = [
+      `fps=${fps}`,
+      `scale=iw:ih`,
+      `zoompan=z='min(1.0+on*${step.toFixed(6)},${factor})':d=1:s=iw:ih:fps=${fps}`
+    ].join(",");
 
     await new Promise((resolve, reject) => {
       ffmpeg(inPath)
-        .videoFilters(filters)
+        .videoFilters(filter)
         .outputOptions([
-          `-t ${dur}`,            // ← длительность из запроса (например, 2.5)
+          `-t ${duration}`,
           "-movflags +faststart",
           "-pix_fmt yuv420p",
           "-c:v libx264",
           "-preset veryfast",
-          "-crf 20",              // качество повыше, чем 22
-          "-vsync cfr",           // стабилизируем FPS
-          `-r ${fpsOut}`,         // форсим частоту кадров в контейнере
-          "-profile:v high",
-          "-level 4.2",
+          "-crf 22",
           "-an"
         ])
         .on("end", resolve)
@@ -311,20 +243,19 @@ app.post("/api/zoom2s", upload.single("file"), async (req, res) => {
         .save(outPath);
     });
 
-    fs.unlink(inPath, () => {});
+    fs.unlink(inPath, ()=>{});
     return res.json({ ok:true, url: absUrl(req, `/uploads/${outName}`) });
   } catch (e) {
     return res.status(500).json({ ok:false, error:String(e.message||e) });
   }
 });
-/* ZOOM2S END */
 
-// --- POST /api/watermark-video  (аккуратный бейдж “HI-AI” справа-снизу)
+/* ====================== WATERMARK ====================== */
 app.post("/api/watermark-video", upload.single("file"), async (req, res) => {
   try {
     const rawLabel = (req.body?.label || "HI-AI").toString();
     const label = rawLabel.replace(/'/g, "\\'");
-    const SCALE = Math.min(Math.max(parseFloat(req.body?.scale || "1.0"), 0.5), 2.0); // 0.5–2.0
+    const SCALE = Math.min(Math.max(parseFloat(req.body?.scale || "1.0"), 0.5), 2.0);
     if (!req.file) return res.status(400).json({ ok:false, error:"no_file" });
 
     const inName = `wm_in_${Date.now()}.mp4`;
@@ -333,7 +264,6 @@ app.post("/api/watermark-video", upload.single("file"), async (req, res) => {
     const outPath = path.join(UPLOAD_DIR, outName);
     fs.writeFileSync(inPath, req.file.buffer);
 
-    // пытаемся использовать системный шрифт; если его нет — рисуем без fontfile
     const FONT = "/usr/share/fonts/truetype/dejavu/DejaVuSans-Bold.ttf";
     const haveFont = fs.existsSync(FONT);
 
@@ -346,14 +276,7 @@ app.post("/api/watermark-video", upload.single("file"), async (req, res) => {
     await new Promise((resolve, reject) => {
       ffmpeg(inPath)
         .videoFilters(draw)
-        .outputOptions([
-          "-movflags +faststart",
-          "-pix_fmt yuv420p",
-          "-c:v libx264",
-          "-preset veryfast",
-          "-crf 22",
-          "-an"
-        ])
+        .outputOptions(["-movflags +faststart","-pix_fmt yuv420p","-c:v libx264","-preset veryfast","-crf 22","-an"])
         .on("end", resolve)
         .on("error", reject)
         .save(outPath);
@@ -960,7 +883,7 @@ app.post("/api/video-studio", async (req, res) => {
 
       const baseInput = { prompt: vprompt, size, duration: secs, negative_prompt:"text, logo, watermark, letters, subtitles", enable_prompt_expansion:true };
       const motion = Math.max(0, Math.min(1, parseFloat(body.motion_strength) || 0.35));
-      const cam = { "push-in": "push-in", "pan-left":"pan-left", "pan-right":"pan-right", "tilt-up":"tilt-up", "tilt-down":"tilt-down" }[
+      const cam = { "push-in": "push-in", "pan-left":"pan-left","pan-right":"pan-right","tilt-up":"tilt-up","tilt-down":"tilt-down" }[
         String(body.camera || "auto").toLowerCase()
       ] || "auto";
       const imageVariants = [
@@ -1211,16 +1134,3 @@ Return JSON:
 /* ====================== START ====================== */
 const PORT = process.env.PORT || 10000;
 app.listen(PORT, () => console.log(`HI-AI backend on :${PORT}`));
-
-
-
-
-
-
-
-
-
-
-
-
-
