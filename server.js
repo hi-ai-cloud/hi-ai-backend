@@ -1,47 +1,47 @@
 // HI-AI HUB — Unified Backend (Brand Post + Image Studio + Video Studio + Video Reels)
 // Express + OpenAI + Replicate (polling, data:URL safe, model routing fixed for Replicate 2025)
 
+// === imports (один раз) ===
 import express from "express";
 import cors from "cors";
 import fetch from "node-fetch";
 import OpenAI from "openai";
 import "dotenv/config";
 
-// --- ffmpeg (trim/zoom/watermark)
 import ffmpegPath from "ffmpeg-static";
 import ffmpeg from "fluent-ffmpeg";
 ffmpeg.setFfmpegPath(ffmpegPath);
 
-// --- uploads
 import multer from "multer";
 import path from "path";
-import fs from "fs"
+import fs from "fs";
 
-// ---- H.264 @ 60 fps, High/4.2, качественный поток близко к CapCut
+// ---- H.264 @ 60 fps, High/4.2 (CapCut-like)
 const H264_60FPS_OPTS = [
-  "-r 60",                  // фиксируем 60 fps на выходе
+  "-r 60",
   "-movflags +faststart",
   "-pix_fmt yuv420p",
   "-c:v libx264",
   "-profile:v high",
   "-level 4.2",
-  "-preset slow",           // можно поднять до 'medium' если нужно быстрее
-  "-crf 18",                // ~высокое качество (~15 Мбит/с для 1080×1920@60)
+  "-preset slow",
+  "-crf 18",
   "-an"
 ];
 
 const app = express();
 app.set("trust proxy", true);
 
-// CORS + preflight + health
-import cors from "cors";
+// === CORS + preflight + health ===
 app.use(cors({
   origin: true,
   methods: ["GET","POST","OPTIONS"],
   allowedHeaders: ["Content-Type","X-API-Key","Accept"]
 }));
-app.options("*", cors());
+// универсальный ответ на preflight
+app.options("*", (req,res)=>res.sendStatus(204));
 
+// health
 app.get("/api/health", (req,res)=>{
   res.set("cache-control","no-store");
   res.json({ ok:true, ts:Date.now() });
@@ -78,7 +78,8 @@ app.use("/uploads", express.static(UPLOAD_DIR, {
   }
 }));
 
-const upload = multer({ storage: multer.memoryStorage(), limits:{ fileSize: 100 * 1024 * 1024 }});
+// multer (используй в /api/upload, /api/trim25, /api/zoom2s, /api/watermark-video)
+const upload = multer({ storage: multer.memoryStorage() });
 
 /* ====================== UTILS ====================== */
 const sleep = (ms) => new Promise((r) => setTimeout(r, ms));
@@ -1170,6 +1171,7 @@ Return JSON:
 /* ====================== START ====================== */
 const PORT = process.env.PORT || 10000;
 app.listen(PORT, () => console.log(`HI-AI backend on :${PORT}`));
+
 
 
 
