@@ -200,20 +200,25 @@ app.post("/api/trim25", upload.single("file"), async (req, res) => {
   }
 });
 
-// --- POST /api/zoom2s  → плавный зум 1.0 → factor за 2.5s @ 60fps + панорамирование
+// --- POST /api/zoom2s  → 2.5 s @ 60fps, явный зум + пан, выход в целевом разрешении
 app.post("/api/zoom2s", upload.single("file"), async (req, res) => {
   try {
     if (!req.file) return res.status(400).json({ ok:false, error:"no_file" });
 
-    // входные параметры (с запасом по валидации)
+    // входные параметры
     const factor = Math.min(Math.max(parseFloat(req.body?.factor || "1.65"), 1.05), 2.5);
     const fps    = Math.min(Math.max(parseInt(req.body?.fps || "60",10), 15), 60);
-    const panX   = parseFloat(req.body?.pan_x ?? "0");    // в пикселях
-    const panY   = parseFloat(req.body?.pan_y ?? "0");    // в пикселях
-    const easing = String(req.body?.easing || "easeInOutCubic"); // пока 1 вариант
+    const panX   = parseFloat(req.body?.pan_x ?? "0");     // px относительно выходного размера
+    const panY   = parseFloat(req.body?.pan_y ?? "0");
+    const easing = String(req.body?.easing || "easeInOutCubic");
     const motion = String(req.body?.motion_blur || "0") === "1";
+    const ratio  = String(req.body?.ratio || "9:16").replace("-", ":");
 
-    const DURATION = 2.5;                  // ровно 2.5 секунды
+    // целевой размер по аспекту
+    const SIZES = { "9:16":[1080,1920], "1:1":[1080,1080], "16:9":[1920,1080] };
+    const [TW, TH] = SIZES[ratio] || SIZES["9:16"];
+
+    const DURATION = 2.5;
     const FRAMES = Math.round(fps * DURATION);
 
     const inName  = `zoom_in_${Date.now()}.mp4`;
@@ -222,40 +227,39 @@ app.post("/api/zoom2s", upload.single("file"), async (req, res) => {
     const outPath = path.join(UPLOAD_DIR, outName);
     fs.writeFileSync(inPath, req.file.buffer);
 
-    // easeInOutCubic(t) через выражения ffmpeg:
-    // t = on/(FRAMES-1)
-    // ease = t<0.5 ? 4*t^3 : 1 - ((-2*t+2)^3)/2
+    // easing t in [0..1]
     const T = `(on/${Math.max(FRAMES-1,1)})`;
-    const ease =
-      easing === "easeInOutCubic"
-        ? `(lte(${T},0.5)*4*pow(${T},3) + gt(${T},0.5)*(1 - pow(-2*${T}+2,3)/2))`
-        : `${T}`; // fallback: линейно
+    const ease = easing === "easeInOutCubic"
+      ? `(lte(${T},0.5)*4*pow(${T},3) + gt(${T},0.5)*(1 - pow(-2*${T}+2,3)/2))`
+      : `${T}`; // линейно, если что
 
     // z(t) = 1 + (factor-1)*ease
     const z = `(1 + (${factor}-1)*${ease})`;
 
-    // текущая видимая ширина/высота кадра при зуме z: w=iw/z, h=ih/z
-    const wVis = `(iw/${z})`;
-    const hVis = `(ih/${z})`;
+    // вход сначала подгоняем к TW×TH (без искажений): scale (cover) + crop
+    // после этого iw/ih для zoompan уже равны TW/TH
+    const preFit = `scale=${TW}:${TH}:force_original_aspect_ratio=increase,crop=${TW}:${TH},setsar=1,format=yuv420p`;
 
-    // центрируем и добавляем плавный сдвиг (panX/panY) по той же кривой ease
+    // видимое окно при зуме z: w=iw/z, h=ih/z (iw,ih == TW,TH)
+    const wVis = `(${TW}/${z})`;
+    const hVis = `(${TH}/${z})`;
+
+    // центр + плавный pan по easing
     const x = `((iw - ${wVis})/2 + (${panX})*${ease})`;
     const y = `((ih - ${hVis})/2 + (${panY})*${ease})`;
 
-    // собираем фильтр zoompan; размер вывода — исходный (s=iw:ih)
-    // d=1 — по кадру на шаг, fps — стабильный
-    // при желании — лёгкий motion blur через minterpolate+tblend (опционально)
-    const zoompan = `zoompan=z='${z}':x='${x}':y='${y}':d=1:s=iw:ih:fps=${fps}`;
+    // zoompan: ровно fps и выходной размер TW×TH
+    const zp = `zoompan=z='${z}':x='${x}':y='${y}':d=1:s=${TW}x${TH}:fps=${fps}`;
     const chain = motion
-      ? `fps=${fps},${zoompan},tblend=all_mode=average`
-      : `fps=${fps},${zoompan}`;
+      ? `${preFit},${zp},tblend=all_mode=average`
+      : `${preFit},${zp}`;
 
     await new Promise((resolve, reject) => {
       ffmpeg(inPath)
         .videoFilters(chain)
         .outputOptions([
-          `-t ${DURATION}`,       // фиксируем длину 2.5 s
-          ...H264_60FPS_OPTS,     // твои общие x264-настройки (60 fps, High/4.2, CRF 18 и т.п.)
+          `-t ${DURATION}`,
+          ...H264_60FPS_OPTS,       // твой общий профиль (60fps, High/4.2, CRF 18)
         ])
         .on("end", resolve)
         .on("error", reject)
@@ -1154,6 +1158,7 @@ Return JSON:
 /* ====================== START ====================== */
 const PORT = process.env.PORT || 10000;
 app.listen(PORT, () => console.log(`HI-AI backend on :${PORT}`));
+
 
 
 
