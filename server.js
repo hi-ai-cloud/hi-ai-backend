@@ -176,31 +176,48 @@ app.post("/api/trim2s", upload.single("file"), async (req, res) => {
   }
 });
 
-// --- POST /api/zoom2s  (плавный зум 1.0 -> factor за 2.0s)
+// --- POST /api/zoom2s  (плавный зум + панорама за ровно 2.0s)
 app.post("/api/zoom2s", upload.single("file"), async (req, res) => {
   try {
     if (!req.file) return res.status(400).json({ ok:false, error:"no_file" });
-    const factor = Math.min(Math.max(parseFloat(req.body?.factor || "1.3"), 1.0), 2.0); // 1.0–2.0
-    const fps = Math.min(Math.max(parseInt(req.body?.fps || "30",10), 15), 60); // 15–60
-    const frames = 2 * fps;               // 2 секунды
-    const step = (factor - 1.0) / frames; // приращение масштаба на кадр
 
-    const inName = `zin_${Date.now()}.mp4`;
+    // CapCut-подобный профиль по умолчанию
+    const factor = Math.min(Math.max(parseFloat(req.body?.factor || "1.63"), 1.0), 2.0); // итоговый масштаб
+    const fps    = Math.min(Math.max(parseInt(req.body?.fps || "30",10), 15), 60);       // кадровая частота
+    const dur    = 2.0;                                                                   // РОВНО 2.0 сек
+
+    // Панорама (в пикселях за ВЕСЬ ролик). По замерам примера: ≈ -201px, -262px за 2s
+    const panX_total = parseFloat(req.body?.pan_x ?? "-201");
+    const panY_total = parseFloat(req.body?.pan_y ?? "-262");
+
+    const frames = Math.round(dur * fps);
+    const stepZ  = (factor - 1.0) / frames;         // приращение масштаба на кадр
+    const stepX  = panX_total / frames;             // сдвиг по X на кадр
+    const stepY  = panY_total / frames;             // сдвиг по Y на кадр
+
+    const inName  = `zin_${Date.now()}.mp4`;
     const outName = `zout_${Date.now()}.mp4`;
-    const inPath = path.join(UPLOAD_DIR, inName);
+    const inPath  = path.join(UPLOAD_DIR, inName);
     const outPath = path.join(UPLOAD_DIR, outName);
     fs.writeFileSync(inPath, req.file.buffer);
 
-    // zoompan с плавным инкрементом
-    // z=min(1.0+on*step, factor), d=1 кадр, fps фиксируем, итог — ровно 2s
-    const filter = `fps=${fps},scale=iw:ih,` +
-                   `zoompan=z='min(1.0+on*${step.toFixed(6)},${factor})':d=1:s=iwxih:fps=${fps}`;
+    // Стабильная длительность: -t 2.0 и финальный fps; object-fit: contain-центрирование сохраняем
+    // z — накапливающийся масштаб (1.0 -> factor), x/y — центр + линейный дрейф
+    // В x/y учитываем автокомпенсацию zoompan: (iw - iw/zoom)/2 и (ih - ih/zoom)/2 держат центр
+    const filter =
+      `scale=iw:ih,` +
+      `zoompan=` +
+        `z='min(1.0+on*${stepZ.toFixed(6)},${factor.toFixed(6)})':` +
+        `x='(iw-iw/zoom)/2 + on*${stepX.toFixed(6)}':` +
+        `y='(ih-ih/zoom)/2 + on*${stepY.toFixed(6)}':` +
+        `d=1:s=iwxih:fps=${fps},` +
+      `fps=${fps}`;
 
     await new Promise((resolve, reject) => {
       ffmpeg(inPath)
         .videoFilters(filter)
         .outputOptions([
-          "-t 2.0",
+          `-t ${dur}`,                 // жёстко режем до ровно 2.0s
           "-movflags +faststart",
           "-pix_fmt yuv420p",
           "-c:v libx264",
@@ -1112,6 +1129,7 @@ Return JSON:
 /* ====================== START ====================== */
 const PORT = process.env.PORT || 10000;
 app.listen(PORT, () => console.log(`HI-AI backend on :${PORT}`));
+
 
 
 
