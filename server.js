@@ -7,58 +7,45 @@ import fetch from "node-fetch";
 import OpenAI from "openai";
 import "dotenv/config";
 
-// --- ffmpeg (2s trim + watermark)
 import ffmpegPath from "ffmpeg-static";
 import ffmpeg from "fluent-ffmpeg";
 ffmpeg.setFfmpegPath(ffmpegPath);
 
-// --- uploads
+// uploads (ЕДИНСТВЕННЫЙ upload!)
 import multer from "multer";
-import path from "path";
 import fs from "fs";
+import path from "path";
 
 const app = express();
 app.set("trust proxy", true);
-app.use(express.json({ limit: "30mb" }));
 
-// === CORS и preflight ===
+// CORS + preflight
 app.use(cors({
   origin: true,
-  methods: ["GET", "POST", "OPTIONS"],
-  allowedHeaders: ["Content-Type", "X-API-Key", "Accept"],
+  methods: ["GET","POST","OPTIONS"],
+  allowedHeaders: ["Content-Type","X-API-Key","Accept"]
 }));
-app.options("*", (req, res) => res.sendStatus(204));
+app.options("*", (req,res)=>res.sendStatus(204));
 
-// === Healthcheck (ping / health) ===
-app.get("/api/ping", (req, res) => {
-  res.set("access-control-allow-origin", "*");
-  res.set("cache-control", "no-store");
-  res.json({ ok: true, pong: true, ts: Date.now() });
+// body
+app.use(express.json({ limit: "30mb" }));
+
+// uploads dir + единый upload
+const UPLOAD_DIR = path.join(process.cwd(), "uploads");
+if (!fs.existsSync(UPLOAD_DIR)) fs.mkdirSync(UPLOAD_DIR, { recursive: true });
+const upload = multer({ storage: multer.memoryStorage(), limits: { fileSize: 100 * 1024 * 1024 } });
+
+// healthchecks
+app.get("/api/ping", (req,res)=>{
+  res.set("access-control-allow-origin","*");
+  res.set("cache-control","no-store");
+  res.json({ ok:true, pong:true, ts: Date.now() });
 });
-
-app.get("/api/health", (req, res) => {
-  res.set("access-control-allow-origin", "*");
-  res.set("cache-control", "no-store");
-  res.json({ ok: true, status: "up", ts: Date.now() });
+app.get("/api/health", (req,res)=>{
+  res.set("access-control-allow-origin","*");
+  res.set("cache-control","no-store");
+  res.json({ ok:true, status:"up", ts: Date.now() });
 });
-
-// === uploads config ===
-const upload = multer({ dest: "uploads/" });
-
-// === пример одной ручки (оставь свои ниже) ===
-app.post("/api/trim25", upload.single("file"), async (req, res) => {
-  try {
-    if (!req.file) return res.status(400).json({ ok: false, error: "no_file" });
-    // здесь твой ffmpeg-код
-    res.json({ ok: true, url: `/uploads/${req.file.filename}.mp4` });
-  } catch (e) {
-    res.status(500).json({ ok: false, error: e.message });
-  }
-});
-
-// === запуск сервера ===
-const PORT = process.env.PORT || 3000;
-app.listen(PORT, () => console.log(`✅ Server started on port ${PORT}`));
 
 /* ====================== ORIGIN HELPERS ====================== */
 function absoluteOrigin(req) {
@@ -1224,6 +1211,7 @@ Return JSON:
 /* ====================== START ====================== */
 const PORT = process.env.PORT || 10000;
 app.listen(PORT, () => console.log(`HI-AI backend on :${PORT}`));
+
 
 
 
