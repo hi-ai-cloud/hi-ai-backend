@@ -15,7 +15,20 @@ ffmpeg.setFfmpegPath(ffmpegPath);
 // --- uploads
 import multer from "multer";
 import path from "path";
-import fs from "fs";
+import fs from "fs"
+
+// ---- H.264 @ 60 fps, High/4.2, качественный поток близко к CapCut
+const H264_60FPS_OPTS = [
+  "-r 60",                  // фиксируем 60 fps на выходе
+  "-movflags +faststart",
+  "-pix_fmt yuv420p",
+  "-c:v libx264",
+  "-profile:v high",
+  "-level 4.2",
+  "-preset slow",           // можно поднять до 'medium' если нужно быстрее
+  "-crf 18",                // ~высокое качество (~15 Мбит/с для 1080×1920@60)
+  "-an"
+];
 
 const app = express();
 app.set("trust proxy", true);
@@ -157,46 +170,31 @@ app.post("/api/upload", upload.single("file"), async (req, res) => {
   }
 });
 
-/* ====================== TRIM 2s / 2.5s ====================== */
-app.post("/api/trim2s", upload.single("file"), async (req, res) => {
-  try {
-    if (!req.file) return res.status(400).json({ ok:false, error:"no_file" });
-    const inName = `in_${Date.now()}.mp4`;
-    const outName = `out_${Date.now()}.mp4`;
-    const inPath = path.join(UPLOAD_DIR, inName);
-    const outPath = path.join(UPLOAD_DIR, outName);
-    fs.writeFileSync(inPath, req.file.buffer);
-    await new Promise((resolve, reject)=>{
-      ffmpeg(inPath)
-        .outputOptions(["-t 2.0","-movflags +faststart","-pix_fmt yuv420p","-c:v libx264","-preset veryfast","-crf 22","-an"])
-        .on("end", resolve).on("error", reject)
-        .save(outPath);
-    });
-    fs.unlink(inPath, ()=>{});
-    return res.json({ ok:true, url: absUrl(req, `/uploads/${outName}`) });
-  } catch(e){
-    console.error(e);
-    return res.status(500).json({ ok:false, error:String(e.message||e) });
-  }
-});
-// alias под фронтовый TRIM:'/api/trim25' (ровно 2.5s)
+// --- POST /api/trim25  → 2.5 s @ 60 fps (капкат-профиль)
 app.post("/api/trim25", upload.single("file"), async (req, res) => {
   try {
     if (!req.file) return res.status(400).json({ ok:false, error:"no_file" });
-    const inName = `t25_in_${Date.now()}.mp4`;
-    const outName = `t25_out_${Date.now()}.mp4`;
-    const inPath = path.join(UPLOAD_DIR, inName);
+
+    const inName  = `trim_in_${Date.now()}.mp4`;
+    const outName = `trim_out_${Date.now()}.mp4`;
+    const inPath  = path.join(UPLOAD_DIR, inName);
     const outPath = path.join(UPLOAD_DIR, outName);
     fs.writeFileSync(inPath, req.file.buffer);
-    await new Promise((resolve, reject)=>{
+
+    await new Promise((resolve, reject) => {
       ffmpeg(inPath)
-        .outputOptions(["-t 2.5","-r 60","-movflags +faststart","-pix_fmt yuv420p","-c:v libx264","-preset veryfast","-crf 22","-an"])
-        .on("end", resolve).on("error", reject)
+        .outputOptions([
+          "-t 2.5",           // ровно 2.5 сек
+          ...H264_60FPS_OPTS, // 60 fps + профиль/уровень/качество
+        ])
+        .on("end", resolve)
+        .on("error", reject)
         .save(outPath);
     });
+
     fs.unlink(inPath, ()=>{});
     return res.json({ ok:true, url: absUrl(req, `/uploads/${outName}`) });
-  } catch(e){
+  } catch (e) {
     console.error(e);
     return res.status(500).json({ ok:false, error:String(e.message||e) });
   }
@@ -1134,3 +1132,4 @@ Return JSON:
 /* ====================== START ====================== */
 const PORT = process.env.PORT || 10000;
 app.listen(PORT, () => console.log(`HI-AI backend on :${PORT}`));
+
