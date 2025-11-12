@@ -176,50 +176,58 @@ app.post("/api/trim2s", upload.single("file"), async (req, res) => {
   }
 });
 
-/* ZOOM2S START */
 app.post("/api/zoom2s", upload.single("file"), async (req, res) => {
   try {
-    if (!req.file) return res.status(400).json({ ok:false, error:"no_file" });
+    if (!req.file) {
+      return res.status(400).json({ ok: false, error: "no_file" });
+    }
 
-    const factor   = Math.min(Math.max(parseFloat(req.body?.factor || "1.35"), 1.0), 2.0);
-    const fpsOut   = Math.min(Math.max(parseInt(req.body?.fps || "60", 10), 24), 60);
-    const dur      = Math.min(Math.max(parseFloat(req.body?.duration || "2.0"), 1.0), 10.0);
-    const panX     = parseFloat(req.body?.pan_x ?? "-220");
-    const panY     = parseFloat(req.body?.pan_y ?? "-260");
-    const easing   = String(req.body?.easing || "easeInOutCubic").toLowerCase();
-    const wantBlur = String(req.body?.motion_blur || "1") === "1";
+    // Параметры (можно передать из фронта через FormData):
+    // duration — длительность (сек), по умолчанию 2.5
+    // factor   — итоговый масштаб (1.0–2.0), по умолчанию 1.35
+    // fps      — выходной FPS (24–60), по умолчанию 60
+    // pan_x / pan_y — панорамирование в пикселях за весь ролик (по умолчанию -220 / -260)
+    // easing   — 'easeInOutCubic'|'easeIn'|'easeOut'|'easeInSine'|'easeOutSine'|'linear'
+    // motion_blur — '1' чтобы включить лёгкий смаз (по умолчанию 1)
+    const dur      = Math.min(Math.max(parseFloat(req.body && req.body.duration || "2.5"), 1.0), 10.0);
+    const factor   = Math.min(Math.max(parseFloat(req.body && req.body.factor   || "1.35"), 1.0), 2.0);
+    const fpsOut   = Math.min(Math.max(parseInt  (req.body && req.body.fps      || "60", 10), 24), 60);
+    const panX     = parseFloat(req.body && (req.body.pan_x ?? "-220"));
+    const panY     = parseFloat(req.body && (req.body.pan_y ?? "-260"));
+    const easingIn = String(req.body && req.body.easing || "easeInOutCubic").toLowerCase();
+    const wantBlur = String(req.body && req.body.motion_blur || "1") === "1";
 
+    // Кол-во кадров и нормализованный прогресс t = on / (frames-1)
     const frames = Math.max(2, Math.round(dur * fpsOut));
     const tExpr  = "on/" + String(frames - 1);
 
-    let easeExpr;
-    switch (easing) {
-      case "easein":      easeExpr = "pow(" + tExpr + ",3)"; break;
-      case "easeout":     easeExpr = "1 - pow(1-" + tExpr + ",3)"; break;
-      case "easeinsine":  easeExpr = "1 - cos(" + tExpr + "*PI/2)"; break;
-      case "easeoutsine": easeExpr = "sin(" + tExpr + "*PI/2)"; break;
-      case "linear":      easeExpr = tExpr; break;
-      default:            easeExpr = "if(lt(" + tExpr + ",0.5), 4*" + tExpr + "*" + tExpr + "*" + tExpr + ", 1 - pow(-2*" + tExpr + "+2,3)/2)";
-    }
+    // Easing в виде выражения FFmpeg (никаких бэктиков/шаблонов, всё простыми строками):
+    var easeExpr;
+    if (easingIn === "easein")       easeExpr = "pow(" + tExpr + ",3)";
+    else if (easingIn === "easeout") easeExpr = "1 - pow(1-" + tExpr + ",3)";
+    else if (easingIn === "easeinsine")  easeExpr = "1 - cos(" + tExpr + "*PI/2)";
+    else if (easingIn === "easeoutsine") easeExpr = "sin(" + tExpr + "*PI/2)";
+    else if (easingIn === "linear")      easeExpr = tExpr;
+    else easeExpr = "if(lt(" + tExpr + ",0.5), 4*" + tExpr + "*" + tExpr + "*" + tExpr + ", 1 - pow(-2*" + tExpr + "+2,3)/2)";
 
+    // Выражения для zoompan
     const zExpr = "1.0 + (" + easeExpr + ")*(" + factor.toFixed(6) + "-1.0)";
     const xExpr = "(iw - iw/zoom)/2 + (" + easeExpr + ")*(" + panX.toFixed(6) + ")";
     const yExpr = "(ih - ih/zoom)/2 + (" + easeExpr + ")*(" + panY.toFixed(6) + ")";
 
+    // I/O
     const inName  = "zin_"  + Date.now() + ".mp4";
     const outName = "zout_" + Date.now() + ".mp4";
     const inPath  = path.join(UPLOAD_DIR, inName);
     const outPath = path.join(UPLOAD_DIR, outName);
     fs.writeFileSync(inPath, req.file.buffer);
 
-    const filters = [
-      "scale=iw:ih",
-      "zoompan=z='" + zExpr + "':x='" + xExpr + "':y='" + yExpr + "':d=1:s=iwxih:fps=" + fpsOut,
-      wantBlur ? "tmix=frames=2:weights=1 1" : null,
-      "fps=" + fpsOut
-    ].filter(Boolean).join(",");
+    // Цепочка фильтров: scale → zoompan (с easing) → (опц.) tmix → fps
+    var filters = "scale=iw:ih,zoompan=z='" + zExpr + "':x='" + xExpr + "':y='" + yExpr + "':d=1:s=iwxih:fps=" + fpsOut;
+    if (wantBlur) filters += ",tmix=frames=2:weights=1 1";
+    filters += ",fps=" + fpsOut;
 
-    await new Promise((resolve, reject) => {
+    await new Promise(function(resolve, reject) {
       ffmpeg(inPath)
         .videoFilters(filters)
         .outputOptions([
@@ -236,13 +244,12 @@ app.post("/api/zoom2s", upload.single("file"), async (req, res) => {
         .save(outPath);
     });
 
-    fs.unlink(inPath, () => {});
-    return res.json({ ok:true, url: absUrl(req, "/uploads/" + outName) });
+    fs.unlink(inPath, function(){});
+    return res.json({ ok: true, url: absUrl(req, "/uploads/" + outName) });
   } catch (e) {
-    return res.status(500).json({ ok:false, error:String(e.message||e) });
+    return res.status(500).json({ ok: false, error: String(e && e.message || e) });
   }
 });
-/* ZOOM2S END */
 
 // --- POST /api/watermark-video  (аккуратный бейдж “HI-AI” справа-снизу)
 app.post("/api/watermark-video", upload.single("file"), async (req, res) => {
@@ -1136,6 +1143,7 @@ Return JSON:
 /* ====================== START ====================== */
 const PORT = process.env.PORT || 10000;
 app.listen(PORT, () => console.log(`HI-AI backend on :${PORT}`));
+
 
 
 
