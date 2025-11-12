@@ -176,24 +176,42 @@ app.post("/api/trim2s", upload.single("file"), async (req, res) => {
   }
 });
 
-// --- POST /api/zoom2s  (плавный зум + панорама за ровно 2.0s)
+// --- POST /api/zoom2s  (CapCut-like smooth zoom+pan, exactly 2.0s)
 app.post("/api/zoom2s", upload.single("file"), async (req, res) => {
   try {
     if (!req.file) return res.status(400).json({ ok:false, error:"no_file" });
 
-    // CapCut-подобный профиль по умолчанию
-    const factor = Math.min(Math.max(parseFloat(req.body?.factor || "1.63"), 1.0), 2.0); // итоговый масштаб
-    const fps    = Math.min(Math.max(parseInt(req.body?.fps || "30",10), 15), 60);       // кадровая частота
-    const dur    = 2.0;                                                                   // РОВНО 2.0 сек
+    // Параметры: итоговый масштаб, fps, пан по X/Y (в пикселях за весь ролик), сглаживание и лёгкий блёр
+    const factor = Math.min(Math.max(parseFloat(req.body?.factor || "1.35"), 1.0), 2.0); // 1.0–2.0
+    const fpsOut = Math.min(Math.max(parseInt(req.body?.fps || "60", 10), 24), 60);      // 24–60 (по умолчанию 60 для «шелка»)
+    const dur    = 2.5;                                                                   // ровно 2.00s
 
-    // Панорама (в пикселях за ВЕСЬ ролик). По замерам примера: ≈ -201px, -262px за 2s
-    const panX_total = parseFloat(req.body?.pan_x ?? "-201");
-    const panY_total = parseFloat(req.body?.pan_y ?? "-262");
+    const panX_total = parseFloat(req.body?.pan_x ?? "-220"); // отрицательное — вверх/влево по вкусу
+    const panY_total = parseFloat(req.body?.pan_y ?? "-260");
 
-    const frames = Math.round(dur * fps);
-    const stepZ  = (factor - 1.0) / frames;         // приращение масштаба на кадр
-    const stepX  = panX_total / frames;             // сдвиг по X на кадр
-    const stepY  = panY_total / frames;             // сдвиг по Y на кадр
+    const easing = String(req.body?.easing || "easeInOutCubic").toLowerCase();
+    const wantBlur = String(req.body?.motion_blur || "1") === "1"; // лёгкий смаз
+
+    // Кол-во кадров, нормализованный прогресс t=on/(N-1)
+    const frames = Math.round(dur * fpsOut);
+    const t = `on/${Math.max(frames - 1, 1)}`;
+
+    // Плавные кривые — приближенно как в CapCut
+    const easeExpr = (() => {
+      switch (easing) {
+        case "easeout":      return `1 - pow(1-${t},3)`;                                   // easeOutCubic
+        case "easein":       return `pow(${t},3)`;                                         // easeInCubic
+        case "easeoutsine":  return `sin(${t}*PI/2)`;                                      // easeOutSine
+        case "easeinsine":   return `1 - cos(${t}*PI/2)`;                                  // easeInSine
+        case "linear":       return `${t}`;
+        default:             return `if(lt(${t},0.5), 4*${t}*${t}*${t}, 1 - pow(-2*${t}+2,3)/2)`; // easeInOutCubic
+      }
+    })();
+
+    // Масштаб и пан с кривой — «ускоряйся/замедляйся» по краям
+    const zExpr = `1.0 + (${easeExpr})*(${factor.toFixed(6)}-1.0)`;
+    const xExpr = `(iw - iw/zoom)/2 + (${easeExpr})*(${panX_total.toFixed(6)})`;
+    const yExpr = `(ih - ih/zoom)/2 + (${easeExpr})*(${panY_total.toFixed(6)})`;
 
     const inName  = `zin_${Date.now()}.mp4`;
     const outName = `zout_${Date.now()}.mp4`;
@@ -201,23 +219,20 @@ app.post("/api/zoom2s", upload.single("file"), async (req, res) => {
     const outPath = path.join(UPLOAD_DIR, outName);
     fs.writeFileSync(inPath, req.file.buffer);
 
-    // Стабильная длительность: -t 2.0 и финальный fps; object-fit: contain-центрирование сохраняем
-    // z — накапливающийся масштаб (1.0 -> factor), x/y — центр + линейный дрейф
-    // В x/y учитываем автокомпенсацию zoompan: (iw - iw/zoom)/2 и (ih - ih/zoom)/2 держат центр
-    const filter =
-      `scale=iw:ih,` +
-      `zoompan=` +
-        `z='min(1.0+on*${stepZ.toFixed(6)},${factor.toFixed(6)})':` +
-        `x='(iw-iw/zoom)/2 + on*${stepX.toFixed(6)}':` +
-        `y='(ih-ih/zoom)/2 + on*${stepY.toFixed(6)}':` +
-        `d=1:s=iwxih:fps=${fps},` +
-      `fps=${fps}`;
+    // Фильтры: масштаб → zoompan (с easing) → лёгкий motion blur (tmix) → fps → кодек
+    // s=iwxih сохраняет исходный размер (object-fit: contain поведение мы имитируем через x/y формулы)
+    const chain = [
+      `scale=iw:ih`,
+      `zoompan=z='${zExpr}':x='${xExpr}':y='${yExpr}':d=1:s=iwxih:fps=${fpsOut}`,
+      wantBlur ? `tmix=frames=2:weights='1 1'` : null, // мягкий смаз на 1 кадр
+      `fps=${fpsOut}`
+    ].filter(Boolean).join(",");
 
     await new Promise((resolve, reject) => {
       ffmpeg(inPath)
-        .videoFilters(filter)
+        .videoFilters(chain)
         .outputOptions([
-          `-t ${dur}`,                 // жёстко режем до ровно 2.0s
+          `-t ${dur}`,                 // жёсткая длительность
           "-movflags +faststart",
           "-pix_fmt yuv420p",
           "-c:v libx264",
@@ -229,6 +244,13 @@ app.post("/api/zoom2s", upload.single("file"), async (req, res) => {
         .on("error", reject)
         .save(outPath);
     });
+
+    fs.unlink(inPath, () => {});
+    return res.json({ ok:true, url: absUrl(req, `/uploads/${outName}`) });
+  } catch (e) {
+    return res.status(500).json({ ok:false, error:String(e.message||e) });
+  }
+});
 
     fs.unlink(inPath, ()=>{});
     return res.json({ ok:true, url: absUrl(req, `/uploads/${outName}`) });
@@ -1129,6 +1151,7 @@ Return JSON:
 /* ====================== START ====================== */
 const PORT = process.env.PORT || 10000;
 app.listen(PORT, () => console.log(`HI-AI backend on :${PORT}`));
+
 
 
 
