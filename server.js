@@ -932,67 +932,40 @@ const ratioToWH = (ratio) => {
       }
     }
 
-    // IMAGE -> VIDEO
-    if (mode === "image2video") {
-      let versionI2V  = (process.env.REPLICATE_MODEL_VERSION_I2V || "").trim();
-      const fallbackSlug = (process.env.REPLICATE_MODEL_SLUG_I2V_HD || "").trim();
-      if (!versionI2V && !fallbackSlug) return res.json({ ok:false, error:"No i2v model (set REPLICATE_MODEL_VERSION_I2V or SLUG_I2V_HD)" });
-
-      const baseInput = { prompt: vprompt, size, duration: secs, negative_prompt:"text, logo, watermark, letters, subtitles", enable_prompt_expansion:true };
-      const motion = Math.max(0, Math.min(1, parseFloat(body.motion_strength) || 0.35));
-      const cam = { "push-in": "push-in", "pan-left":"pan-left","pan-right":"pan-right","tilt-up":"tilt-up","tilt-down":"tilt-down" }[
-        String(body.camera || "auto").toLowerCase()
-      ] || "auto";
-      const imageVariants = [
-        { key:"start_image", value: incomingImage },
-        { key:"image",       value: incomingImage },
-        { key:"input_image", value: incomingImage },
-      ];
-      const extra = { camera_motion_strength: motion, camera_motion: cam };
-
-      try {
-        if (versionI2V) {
-          let got = null; let lastErr = null;
-          for (const v of imageVariants) {
-            try {
-              const job = await replicatePredict(versionI2V, { ...baseInput, ...extra, [v.key]: v.value }, { tries:240, delayMs:1500 });
-              got = typeof job.output === "string" ? job.output : Array.isArray(job.output) ? job.output[0] : null;
-              if (got) break;
-            } catch (e) { lastErr = e; }
-          }
-          if (!got && lastErr) throw lastErr;
-          video_url = got;
-        } else {
-          let got = null; let lastErr = null;
-          for (const v of imageVariants) {
-            try {
-              const job = await replicateCreateBySlug(fallbackSlug, { ...baseInput, ...extra, [v.key]: v.value });
-              const done = await pollPredictionByUrl(job?.urls?.get, { tries:240, delayMs:1500 });
-              const out = done?.output;
-              got = typeof out === "string" ? out : Array.isArray(out) ? out[0] : null;
-              if (got) break;
-            } catch (e) { lastErr = e; }
-          }
-          if (!got && lastErr) throw lastErr;
-          video_url = got;
-        }
-      } catch (e) {
-        return res.json({ ok:false, error:`Replicate i2v error: ${e.message}` });
-      }
-    }
-
-    return res.json({
-      ok: true,
-      vprompt,
-      video_url: video_url || null,
-      image_url: image_url || null,
-      ratio, seconds: secs, size_used: size,
-      mode: video_url ? modeUsed : image_url ? "image_fallback" : mode,
-    });
-  } catch (e) {
-    res.json({ ok:false, error:String(e.message||e) });
+    // IMAGE → VIDEO (WAN 2.5 FIX + 2.5 SEC)
+if (mode === "image2video") {
+  const fallbackSlug = (process.env.REPLICATE_MODEL_SLUG_I2V_HD || "").trim();
+  if (!fallbackSlug) {
+    return res.json({ ok:false, error:"No I2V model configured." });
   }
-});
+
+  try {
+    const inputWan = {
+      image: incomingImage,
+      prompt: vprompt,
+      negative_prompt: "text, logo, watermark, letters, subtitles",
+      resolution: "720p",
+      duration: 2.5,
+      enable_prompt_expansion: true
+    };
+
+    const job  = await replicateCreateBySlug(fallbackSlug, inputWan);
+    const done = await pollPredictionByUrl(job?.urls?.get, {
+      tries: 240,
+      delayMs: 1500
+    });
+
+    const out = done?.output;
+    const got = Array.isArray(out) ? out[0] : out;
+
+    if (!got) throw new Error("No output from WAN 2.5");
+    video_url = got;
+
+  } catch (e) {
+    return res.json({ ok:false, error:"WAN 2.5 ERROR" });
+  }
+}
+
 
 /* ====================== VIDEO REELS ====================== */
 app.post("/api/video-reels", async (req, res) => {
@@ -1191,6 +1164,7 @@ Return JSON:
 /* ====================== START ====================== */
 const PORT = process.env.PORT || 10000;
 app.listen(PORT, () => console.log(`HI-AI backend on :${PORT}`));
+
 
 
 
