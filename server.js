@@ -873,7 +873,7 @@ app.post("/api/video-studio", async (req, res) => {
       prompt: finalPrompt,
       negative_prompt: "text, watermark, logo, subtitles, letters",
       resolution: "720p",
-      duration: 2.5,
+      duration: 5,
       enable_prompt_expansion: true
     };
 
@@ -1108,6 +1108,7 @@ Return JSON:
 /* ====================== START ====================== */
 const PORT = process.env.PORT || 10000;
 app.listen(PORT, () => console.log(`HI-AI backend on :${PORT}`));
+
 
 
 
