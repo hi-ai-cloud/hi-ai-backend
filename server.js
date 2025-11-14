@@ -901,7 +901,7 @@ app.post("/api/video-studio", async (req, res) => {
 
     // --- картинка для image2video ---
     let incomingImage =
-  (body.image_data && String(body.image_data).trim()) ||
+  (body.image_data && String(body.image_data).trim()) ||    // ← ДОБАВЛЕНО
   (body.image_data_url && String(body.image_data_url).trim()) ||
   (body.image && String(body.image).trim()) ||
   (body.image_url && String(body.image_url).trim()) ||
@@ -1003,9 +1003,10 @@ if (mode === "image2video") {
   }
 
   try {
-    const inputWan = {
-      image: incomingImage,
-      prompt: vprompt,
+  const inputWan = {
+  image: incomingImage,
+  prompt: body.prompt || vprompt || "cinematic wallpaper",   // ← ФИКС
+
       negative_prompt: "text, logo, watermark, letters, subtitles",
       resolution: "720p",
       duration: 5,                 // ВАЖНО: WAN 2.5 ест ТОЛЬКО 5 или 10
@@ -1251,6 +1252,7 @@ Return JSON:
 /* ====================== START ====================== */
 const PORT = process.env.PORT || 10000;
 app.listen(PORT, () => console.log(`HI-AI backend on :${PORT}`));
+
 
 
 
