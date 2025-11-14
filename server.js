@@ -167,11 +167,25 @@ app.post("/api/trim2s", upload.single("file"), async (req, res) => {
     const outPath = path.join(UPLOAD_DIR, outName);
     fs.writeFileSync(inPath, req.file.buffer);
     await new Promise((resolve, reject)=>{
-      ffmpeg(inPath)
-        .outputOptions(["-t 2.0","-movflags +faststart","-pix_fmt yuv420p","-c:v libx264","-preset veryfast","-crf 22","-an"])
-        .on("end", resolve).on("error", reject)
-        .save(outPath);
-    });
+  ffmpeg(inPath)
+    .outputOptions([
+      "-t 2.5",
+      "-r 60",
+      "-movflags +faststart",
+      "-pix_fmt yuv420p",
+      "-c:v libx264",
+      "-profile:v high",
+      "-level 4.1",
+      "-preset veryfast",
+      "-crf 18",        // вместо 22
+      "-maxrate 12M",   // таргет по верхнему битрейту
+      "-bufsize 24M",   // буфер для стабильности
+      "-an"
+    ])
+    .on("end", resolve).on("error", reject)
+    .save(outPath);
+});
+
     fs.unlink(inPath, ()=>{});
     return res.json({ ok:true, url: absUrl(req, `/uploads/${outName}`) });
   } catch(e){
@@ -221,27 +235,32 @@ app.post("/api/zoom2s", upload.single("file"), async (req, res) => {
 
     // zoompan: s=iw:ih (исправлено), fps фиксируем, длина = duration
     const filter = [
-      `fps=${fps}`,
-      `scale=iw:ih`,
-      `zoompan=z='min(1.0+on*${step.toFixed(6)},${factor})':d=1:s=iw:ih:fps=${fps}`
-    ].join(",");
+  `fps=${fps}`,
+  `scale=iw:ih`, // сохраняем исходное разрешение от Replicate
+  `zoompan=z='min(1.0+on*${step.toFixed(6)},${factor})':d=1:s=iw:ih:fps=${fps}`
+].join(",");
 
-    await new Promise((resolve, reject) => {
-      ffmpeg(inPath)
-        .videoFilters(filter)
-        .outputOptions([
-          `-t ${duration}`,
-          "-movflags +faststart",
-          "-pix_fmt yuv420p",
-          "-c:v libx264",
-          "-preset veryfast",
-          "-crf 22",
-          "-an"
-        ])
-        .on("end", resolve)
-        .on("error", reject)
-        .save(outPath);
-    });
+await new Promise((resolve, reject) => {
+  ffmpeg(inPath)
+    .videoFilters(filter)
+    .outputOptions([
+      `-t ${duration}`,
+      "-movflags +faststart",
+      "-pix_fmt yuv420p",
+      "-c:v libx264",
+      "-profile:v high",
+      "-level 4.1",
+      "-preset veryfast",
+      "-crf 18",       // лучше качество
+      "-maxrate 12M",
+      "-bufsize 24M",
+      "-an"
+    ])
+    .on("end", resolve)
+    .on("error", reject)
+    .save(outPath);
+});
+
 
     fs.unlink(inPath, ()=>{});
     return res.json({ ok:true, url: absUrl(req, `/uploads/${outName}`) });
@@ -274,13 +293,25 @@ app.post("/api/watermark-video", upload.single("file"), async (req, res) => {
       `x=w-tw-14*${SCALE}:y=h-th-14*${SCALE}`;
 
     await new Promise((resolve, reject) => {
-      ffmpeg(inPath)
-        .videoFilters(draw)
-        .outputOptions(["-movflags +faststart","-pix_fmt yuv420p","-c:v libx264","-preset veryfast","-crf 22","-an"])
-        .on("end", resolve)
-        .on("error", reject)
-        .save(outPath);
-    });
+  ffmpeg(inPath)
+    .videoFilters(draw)
+    .outputOptions([
+      "-movflags +faststart",
+      "-pix_fmt yuv420p",
+      "-c:v libx264",
+      "-profile:v high",
+      "-level 4.1",
+      "-preset veryfast",
+      "-crf 18",
+      "-maxrate 12M",
+      "-bufsize 24M",
+      "-an"
+    ])
+    .on("end", resolve)
+    .on("error", reject)
+    .save(outPath);
+});
+
 
     fs.unlink(inPath, () => {});
     return res.json({ ok:true, url: absUrl(req, `/uploads/${outName}`) });
@@ -1134,3 +1165,4 @@ Return JSON:
 /* ====================== START ====================== */
 const PORT = process.env.PORT || 10000;
 app.listen(PORT, () => console.log(`HI-AI backend on :${PORT}`));
+
