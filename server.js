@@ -170,7 +170,7 @@ app.post("/api/trim2s", upload.single("file"), async (req, res) => {
   ffmpeg(inPath)
     .outputOptions([
       "-t 2.5",
-      "-r 60",
+      "-r 30",
       "-movflags +faststart",
       "-pix_fmt yuv420p",
       "-c:v libx264",
@@ -1165,4 +1165,5 @@ Return JSON:
 /* ====================== START ====================== */
 const PORT = process.env.PORT || 10000;
 app.listen(PORT, () => console.log(`HI-AI backend on :${PORT}`));
+
 
