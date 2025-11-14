@@ -814,18 +814,29 @@ app.post("/api/video-studio", async (req, res) => {
     const body = readBody(req.body);
 
     const mapRatioToWanSize = (ratio) => {
-      const r = String(ratio || "9:16").replace("-", ":");
-      if (r === "16:9") return "1920*1080";
-      if (r === "1:1") return "1080*1080";
-      return "1080*1920";
-    };
-    const fitDurationToWan = (sec) => (parseInt(sec || 5, 10) <= 5 ? 5 : 10);
-    const ratioToWH = (ratio) => {
-      const r = String(ratio || "9:16").replace("-", ":");
-      if (r === "16:9") return [1920, 1080];
-      if (r === "1:1") return [1080, 1080];
-      return [1080, 1920];
-    };
+  // ВСЕГДА 720p tier для WAN (экономим деньги, качество почти как 1080)
+  const r = String(ratio || "9:16").replace("-", ":");
+  if (r === "16:9") return "1280*720";   // 16:9 @ 720p
+  if (r === "1:1")  return "720*720";    // 1:1 @ 720p
+  return "720*1280";                     // 9:16 @ 720p
+};
+
+// Разрешаем ДРОБНЫЕ секунды (2.5, 3.2 и т.д.), а не только 5/10
+const fitDurationToWan = (sec) => {
+  const s = Number(sec ?? 2.5);
+  if (!Number.isFinite(s) || s <= 0) return 2.5; // дефолт — 2.5s
+  if (s > 10) return 10;                          // максимум 10s (лимит WAN)
+  return s;                                       // 2.5, 3, 4.7 — всё ок
+};
+
+const ratioToWH = (ratio) => {
+  // это только для статики/картинок — тут оставляем FullHD размеры
+  const r = String(ratio || "9:16").replace("-", ":");
+  if (r === "16:9") return [1920, 1080];
+  if (r === "1:1")  return [1080, 1080];
+  return [1080, 1920];
+};
+
     const buildVPrompt = ({ idea, style, ratio, seconds, category, subcategory }) => {
       const topic = [category || "General", subcategory || ""].filter(Boolean).join(" • ");
       const hints = {
@@ -851,7 +862,7 @@ app.post("/api/video-studio", async (req, res) => {
     const idea  = String(body.idea || body.prompt || "").trim();
     const style = String(body.style || "auto").toLowerCase();
     const ratio = String(body.ratio || "9:16").replace("-", ":");
-    const secs  = fitDurationToWan(body.video_seconds ?? body.duration_seconds ?? 5);
+    const secs  = fitDurationToWan(body.video_seconds ?? body.duration_seconds ?? 2.5);
     const size  = mapRatioToWanSize(ratio);
     const [w, h] = ratioToWH(ratio);
 
@@ -1165,5 +1176,6 @@ Return JSON:
 /* ====================== START ====================== */
 const PORT = process.env.PORT || 10000;
 app.listen(PORT, () => console.log(`HI-AI backend on :${PORT}`));
+
 
 
