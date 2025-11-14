@@ -828,22 +828,14 @@ app.post("/api/video-studio", async (req, res) => {
   try {
     const body = readBody(req.body);
 
-    // FRONT шлёт "i2v" → картинка → видео
+    // FRONT шлет "i2v" → картинка → видео
     const rawMode = String(body.mode || "i2v").toLowerCase();
     const mode =
       rawMode === "i2v" || rawMode === "image2video"
         ? "image2video"
-        : rawMode === "video"
-        ? "video"
-        : "image2video";
+        : "image2video"; // других режимов тут больше нет
 
-    // этот эндпоинт сейчас только под image→video
-    if (mode === "video") {
-      return res.json({
-        ok: false,
-        error: "Video mode is handled on /api/zoom2s",
-      });
-    }
+    let video_url = null;
 
     // =============== IMAGE → VIDEO (WAN 2.5) ===============
     const fallbackSlug = (process.env.REPLICATE_MODEL_SLUG_I2V_HD || "").trim();
@@ -851,29 +843,29 @@ app.post("/api/video-studio", async (req, res) => {
       return res.json({ ok: false, error: "No I2V model configured." });
     }
 
-    // Берём картинку из тела запроса
+    // картинку берем отсюда – это то, что ты шлёшь из HTML
     let incomingImage =
-      body.image_data_url ||  // то, что ты шлёшь из HTML
-      body.image ||           // запасной вариант
-      body.image_url ||       // запасной вариант
+      body.image_data_url ||
+      body.image ||
+      body.image_url ||
       "";
 
     if (!incomingImage) {
       return res.json({ ok: false, error: "Missing image_data_url" });
     }
 
-    // Чиним data:URL
+    // если data:URL — чиним
     if (incomingImage.startsWith("data:")) {
       const fixed = makeDataUrlSafe(incomingImage);
       if (!fixed) return res.json({ ok: false, error: "Bad data URL" });
       incomingImage = fixed;
     }
 
-    // PROMPT — ОБЯЗАТЕЛЬНО
+    // PROMPT — обязателен
     const finalPrompt = (
       body.prompt ||
       body.idea ||
-      "cinematic lighting, smooth camera motion"
+      "cinematic lighting, smooth motion, no text on frame"
     ).toString();
 
     const inputWan = {
@@ -882,16 +874,16 @@ app.post("/api/video-studio", async (req, res) => {
       negative_prompt: "text, watermark, logo, subtitles, letters",
       resolution: "720p",
       duration: 2.5,
-      enable_prompt_expansion: true,
+      enable_prompt_expansion: true
     };
 
     try {
-      // ВАЖНО: без лишнего { input: ... }
+      // ВАЖНО: без { input: inputWan } !
       const job = await replicateCreateBySlug(fallbackSlug, inputWan);
 
       const done = await pollPredictionByUrl(job?.urls?.get, {
         tries: 240,
-        delayMs: 1500,
+        delayMs: 1500
       });
 
       const out = done?.output;
@@ -901,13 +893,13 @@ app.post("/api/video-studio", async (req, res) => {
 
       return res.json({
         ok: true,
-        video_url: got,
+        video_url: got
       });
     } catch (e) {
       console.error("WAN 2.5 ERROR:", e?.response?.data || e);
       return res.json({
         ok: false,
-        error: `WAN 2.5 ERROR: ${e.message || e}`,
+        error: `WAN 2.5 ERROR: ${e.message || e}`
       });
     }
   } catch (e) {
@@ -915,53 +907,6 @@ app.post("/api/video-studio", async (req, res) => {
     return res
       .status(500)
       .json({ ok: false, error: String(e.message || e) });
-  }
-});
-
-    /* ================= VIDEO → TRIM/ZOOM ================= */
-    if (mode === "video") {
-
-      if (!req.files || !req.files.file) {
-        return res.json({ ok:false, error:"No video file uploaded" });
-      }
-
-      const file = req.files.file;
-
-      try {
-        const fd = new FormData();
-        fd.append("file", file.data, "clip.mp4");
-        fd.append("duration", "2.5");
-        fd.append("fps", "30");
-        fd.append("factor", "1.60");
-        fd.append("pan_x", "-220");
-        fd.append("pan_y", "-260");
-        fd.append("easing", "easeInOutCubic");
-        fd.append("motion_blur", "1");
-
-        const zr = await fetchJSON(process.env.ZOOM2S_URL, { method:"POST", body:fd });
-
-        if (!zr.ok || !zr.url) throw new Error("zoom_failed");
-
-        video_url = zr.url;
-
-      } catch (e) {
-        return res.json({ ok:false, error:"Video processing failed" });
-      }
-    }
-
-    /* ================ RETURN ================== */
-    if (!video_url) {
-      return res.json({ ok:false, error:"Nothing generated" });
-    }
-
-    return res.json({
-      ok: true,
-      video_url
-    });
-
-  } catch (e) {
-    console.error("VIDEO_STUDIO ERROR", e);
-    return res.status(500).json({ ok:false, error:String(e.message || e) });
   }
 });
 
@@ -1163,6 +1108,7 @@ Return JSON:
 /* ====================== START ====================== */
 const PORT = process.env.PORT || 10000;
 app.listen(PORT, () => console.log(`HI-AI backend on :${PORT}`));
+
 
 
 
