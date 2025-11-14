@@ -1,59 +1,63 @@
 // HI-AI HUB — Unified Backend (Brand Post + Image Studio + Video Studio + Video Reels)
-// Express + OpenAI + Replicate (polling, data:URL safe, model routing fixed for Replicate 2025)
 
-// === imports (один раз) ===
 import express from "express";
-import cors from "cors";
+// import cors from "cors"; // БОЛЬШЕ НЕ НУЖЕН, можно оставить закомментированным
 import fetch from "node-fetch";
 import OpenAI from "openai";
 import "dotenv/config";
 
+// --- ffmpeg (trim/zoom/watermark)
 import ffmpegPath from "ffmpeg-static";
 import ffmpeg from "fluent-ffmpeg";
 ffmpeg.setFfmpegPath(ffmpegPath);
 
+// --- uploads
 import multer from "multer";
 import path from "path";
 import fs from "fs";
 
-// ---- H.264 @ 60 fps, High/4.2 (CapCut-like)
+// ---- H.264 @ 60 fps, High/4.2, качественный поток близко к CapCut
 const H264_60FPS_OPTS = [
-  "-r 60",
+  "-r 60",                  // фиксируем 60 fps на выходе
   "-movflags +faststart",
   "-pix_fmt yuv420p",
   "-c:v libx264",
   "-profile:v high",
   "-level 4.2",
-  "-preset slow",
-  "-crf 18",
+  "-preset slow",           // можно поднять до 'medium' если нужно быстрее
+  "-crf 18",                // высокое качество
   "-an"
 ];
 
 const app = express();
 app.set("trust proxy", true);
 
-// === CORS + preflight + health ===
-app.use(cors({
-  origin: true,
-  methods: ["GET","POST","OPTIONS"],
-  allowedHeaders: ["Content-Type","X-API-Key","Accept"]
-}));
-// универсальный ответ на preflight
-app.options("*", (req,res)=>res.sendStatus(204));
+/* ======== ГЛОБАЛЬНЫЙ CORS ДЛЯ ВСЕГО БЭКЕНДА ======== */
+app.use((req, res, next) => {
+  res.header("Access-Control-Allow-Origin", "*"); // hi-ai.ai, локалка – все ок
+  res.header("Access-Control-Allow-Methods", "GET,POST,OPTIONS");
+  res.header("Access-Control-Allow-Headers", "Content-Type,X-API-Key,Accept");
 
-// health
-app.get("/api/health", (req,res)=>{
-  res.set("cache-control","no-store");
-  res.json({ ok:true, ts:Date.now() });
+  if (req.method === "OPTIONS") {
+    return res.sendStatus(204); // preflight ответ и до хендлеров не доходим
+  }
+  next();
 });
 
-// лог запросов
-app.use((req,res,next)=>{
+/* ======== HEALTH ======== */
+app.get("/api/health", (req, res) => {
+  res.set("cache-control", "no-store");
+  res.json({ ok: true, ts: Date.now() });
+});
+
+// лог запросов (оставляем, полезно)
+app.use((req, res, next) => {
   console.log(new Date().toISOString(), req.method, req.url);
   next();
 });
 
 app.use(express.json({ limit: "30mb" }));
+
 
 /* ====================== ORIGIN HELPERS ====================== */
 function absoluteOrigin(req) {
@@ -1171,6 +1175,7 @@ Return JSON:
 /* ====================== START ====================== */
 const PORT = process.env.PORT || 10000;
 app.listen(PORT, () => console.log(`HI-AI backend on :${PORT}`));
+
 
 
 
