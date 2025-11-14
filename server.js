@@ -187,13 +187,15 @@ app.post("/api/upload", upload.single("file"), async (req, res) => {
   }
 });
 
-// --- POST /api/trim25  → 2.5 s @ 60 fps (капкат-профиль)
+// --- POST /api/trim25  → 2.5 s @ 60 fps
 app.post("/api/trim25", upload.single("file"), async (req, res) => {
   try {
-    if (!req.file) return res.status(400).json({ ok:false, error:"no_file" });
+    if (!req.file) {
+      return res.status(400).json({ ok: false, error: "no_file" });
+    }
 
-    const inName  = `trim_in_${Date.now()}.mp4`;
-    const outName = `trim_out_${Date.now()}.mp4`;
+    const inName  = `trim25_in_${Date.now()}.mp4`;
+    const outName = `trim25_out_${Date.now()}.mp4`;
     const inPath  = path.join(UPLOAD_DIR, inName);
     const outPath = path.join(UPLOAD_DIR, outName);
     fs.writeFileSync(inPath, req.file.buffer);
@@ -201,42 +203,42 @@ app.post("/api/trim25", upload.single("file"), async (req, res) => {
     await new Promise((resolve, reject) => {
       ffmpeg(inPath)
         .outputOptions([
-          "-t 2.5",           // ровно 2.5 сек
-          ...H264_60FPS_OPTS, // 60 fps + профиль/уровень/качество
+          "-t", "2.5",          // длина 2.5 сек
+          "-r", "60",           // 60 fps
+          "-movflags", "+faststart",
+          "-pix_fmt", "yuv420p",
+          "-c:v", "libx264",
+          "-preset", "slow",
+          "-crf", "18",
+          "-an"
         ])
         .on("end", resolve)
         .on("error", reject)
         .save(outPath);
     });
 
-    fs.unlink(inPath, ()=>{});
-    return res.json({ ok:true, url: absUrl(req, `/uploads/${outName}`) });
+    fs.unlink(inPath, () => {});
+    return res.json({ ok: true, url: absUrl(req, `/uploads/${outName}`) });
   } catch (e) {
-    console.error(e);
-    return res.status(500).json({ ok:false, error:String(e.message||e) });
+    console.error("trim25 error:", e);
+    return res.status(500).json({ ok: false, error: String(e.message || e) });
   }
 });
 
-// --- POST /api/zoom2s  → 2.5 s @ 60fps, явный зум + пан, выход в целевом разрешении
+// --- POST /api/zoom2s  → плавный зум за duration (по умолчанию 2.5s) @ 60 fps
 app.post("/api/zoom2s", upload.single("file"), async (req, res) => {
   try {
-    if (!req.file) return res.status(400).json({ ok:false, error:"no_file" });
+    if (!req.file) {
+      return res.status(400).json({ ok: false, error: "no_file" });
+    }
 
-    // входные параметры
-    const factor = Math.min(Math.max(parseFloat(req.body?.factor || "1.65"), 1.05), 2.5);
-    const fps    = Math.min(Math.max(parseInt(req.body?.fps || "60",10), 15), 60);
-    const panX   = parseFloat(req.body?.pan_x ?? "0");     // px относительно выходного размера
-    const panY   = parseFloat(req.body?.pan_y ?? "0");
-    const easing = String(req.body?.easing || "easeInOutCubic");
-    const motion = String(req.body?.motion_blur || "0") === "1";
-    const ratio  = String(req.body?.ratio || "9:16").replace("-", ":");
+    // параметры с фронта, но с безопасными лимитами
+    const factor   = Math.min(Math.max(parseFloat(req.body?.factor   || "1.65"), 1.0), 2.5);
+    const fps      = Math.min(Math.max(parseInt (req.body?.fps      || "60", 10), 15), 60);
+    const duration = parseFloat(req.body?.duration || "2.5") || 2.5;
 
-    // целевой размер по аспекту
-    const SIZES = { "9:16":[1080,1920], "1:1":[1080,1080], "16:9":[1920,1080] };
-    const [TW, TH] = SIZES[ratio] || SIZES["9:16"];
-
-    const DURATION = 2.5;
-    const FRAMES = Math.round(fps * DURATION);
+    const frames = Math.max(1, Math.round(duration * fps));
+    const step   = (factor - 1.0) / frames; // на сколько увеличиваем зум на кадр
 
     const inName  = `zoom_in_${Date.now()}.mp4`;
     const outName = `zoom_out_${Date.now()}.mp4`;
@@ -244,52 +246,43 @@ app.post("/api/zoom2s", upload.single("file"), async (req, res) => {
     const outPath = path.join(UPLOAD_DIR, outName);
     fs.writeFileSync(inPath, req.file.buffer);
 
-    // easing t in [0..1]
-    const T = `(on/${Math.max(FRAMES-1,1)})`;
-    const ease = easing === "easeInOutCubic"
-      ? `(lte(${T},0.5)*4*pow(${T},3) + gt(${T},0.5)*(1 - pow(-2*${T}+2,3)/2))`
-      : `${T}`; // линейно, если что
-
-    // z(t) = 1 + (factor-1)*ease
-    const z = `(1 + (${factor}-1)*${ease})`;
-
-    // вход сначала подгоняем к TW×TH (без искажений): scale (cover) + crop
-    // после этого iw/ih для zoompan уже равны TW/TH
-    const preFit = `scale=${TW}:${TH}:force_original_aspect_ratio=increase,crop=${TW}:${TH},setsar=1,format=yuv420p`;
-
-    // видимое окно при зуме z: w=iw/z, h=ih/z (iw,ih == TW,TH)
-    const wVis = `(${TW}/${z})`;
-    const hVis = `(${TH}/${z})`;
-
-    // центр + плавный pan по easing
-    const x = `((iw - ${wVis})/2 + (${panX})*${ease})`;
-    const y = `((ih - ${hVis})/2 + (${panY})*${ease})`;
-
-    // zoompan: ровно fps и выходной размер TW×TH
-    const zp = `zoompan=z='${z}':x='${x}':y='${y}':d=1:s=${TW}x${TH}:fps=${fps}`;
-    const chain = motion
-      ? `${preFit},${zp},tblend=all_mode=average`
-      : `${preFit},${zp}`;
+    // scale → crop → zoompan
+    const filter = [
+      // сначала приводим к 1080x1920, сохраняя пропорции, и обрезаем по 9:16
+      "scale=1080:1920:force_original_aspect_ratio=increase",
+      "crop=1080:1920",
+      // затем делаем плавный зум к центру
+      `zoompan=z='min(1.0+on*${step.toFixed(6)},${factor})':` +
+      `d=1:x='iw/2-(iw/zoom/2)':y='ih/2-(ih/zoom/2)':` +
+      `s=1080x1920:fps=${fps}`
+    ].join(",");
 
     await new Promise((resolve, reject) => {
       ffmpeg(inPath)
-        .videoFilters(chain)
+        .videoFilters(filter)
         .outputOptions([
-          `-t ${DURATION}`,
-          ...H264_60FPS_OPTS,       // твой общий профиль (60fps, High/4.2, CRF 18)
+          "-t", String(duration),
+          "-r", String(fps),
+          "-movflags", "+faststart",
+          "-pix_fmt", "yuv420p",
+          "-c:v", "libx264",
+          "-preset", "slow",
+          "-crf", "18",
+          "-an"
         ])
         .on("end", resolve)
         .on("error", reject)
         .save(outPath);
     });
 
-    fs.unlink(inPath, ()=>{});
-    return res.json({ ok:true, url: absUrl(req, `/uploads/${outName}`) });
+    fs.unlink(inPath, () => {});
+    return res.json({ ok: true, url: absUrl(req, `/uploads/${outName}`) });
   } catch (e) {
-    console.error(e);
-    return res.status(500).json({ ok:false, error:String(e.message||e) });
+    console.error("zoom2s error:", e);
+    return res.status(500).json({ ok: false, error: String(e.message || e) });
   }
 });
+
 
 /* ====================== WATERMARK ====================== */
 app.post("/api/watermark-video", upload.single("file"), async (req, res) => {
@@ -1175,6 +1168,7 @@ Return JSON:
 /* ====================== START ====================== */
 const PORT = process.env.PORT || 10000;
 app.listen(PORT, () => console.log(`HI-AI backend on :${PORT}`));
+
 
 
 
