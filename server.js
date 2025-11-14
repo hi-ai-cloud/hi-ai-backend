@@ -20,6 +20,16 @@ import fs from "fs";
 const app = express();
 app.set("trust proxy", true);
 
+// Жёсткий CORS на всё — поверх всего
+app.use((req, res, next) => {
+  res.setHeader("Access-Control-Allow-Origin", "*");
+  res.setHeader("Access-Control-Allow-Methods", "GET,POST,OPTIONS");
+  res.setHeader("Access-Control-Allow-Headers", "Content-Type, X-API-Key, Accept");
+  if (req.method === "OPTIONS") return res.sendStatus(204);
+  next();
+});
+
+
 // CORS + preflight (разрешаем X-API-Key и OPTIONS)
 app.use(cors({
   origin: true,
@@ -158,33 +168,36 @@ app.post("/api/upload", upload.single("file"), async (req, res) => {
 });
 
 /* ====================== TRIM 2s / 2.5s ====================== */
-app.post("/api/trim2s", upload.single("file"), async (req, res) => {
+app.post("/api/trim25", upload.single("file"), async (req, res) => {
+  // CORS
+  res.setHeader("Access-Control-Allow-Origin", "*");
+
   try {
     if (!req.file) return res.status(400).json({ ok:false, error:"no_file" });
-    const inName = `in_${Date.now()}.mp4`;
-    const outName = `out_${Date.now()}.mp4`;
+    const inName = `t25_in_${Date.now()}.mp4`;
+    const outName = `t25_out_${Date.now()}.mp4`;
     const inPath = path.join(UPLOAD_DIR, inName);
     const outPath = path.join(UPLOAD_DIR, outName);
     fs.writeFileSync(inPath, req.file.buffer);
-    await new Promise((resolve, reject)=>{
-  ffmpeg(inPath)
-    .outputOptions([
-      "-t 2.5",
-      "-r 30",
-      "-movflags +faststart",
-      "-pix_fmt yuv420p",
-      "-c:v libx264",
-      "-profile:v high",
-      "-level 4.1",
-      "-preset veryfast",
-      "-crf 18",        // вместо 22
-      "-maxrate 12M",   // таргет по верхнему битрейту
-      "-bufsize 24M",   // буфер для стабильности
-      "-an"
-    ])
-    .on("end", resolve).on("error", reject)
-    .save(outPath);
-});
+
+    await new Promise((resolve, reject)=> {
+      ffmpeg(inPath)
+        .outputOptions([
+          "-t 2.5",
+          "-r 30",                     // ← тут потом про fps поговорим
+          "-movflags +faststart",
+          "-pix_fmt yuv420p",
+          "-c:v libx264",
+          "-preset veryfast",
+          "-crf 18",                  // ты уже поставил 18
+          "-maxrate 12M",
+          "-bufsize 24M",
+          "-an"
+        ])
+        .on("end", resolve)
+        .on("error", reject)
+        .save(outPath);
+    });
 
     fs.unlink(inPath, ()=>{});
     return res.json({ ok:true, url: absUrl(req, `/uploads/${outName}`) });
@@ -193,6 +206,7 @@ app.post("/api/trim2s", upload.single("file"), async (req, res) => {
     return res.status(500).json({ ok:false, error:String(e.message||e) });
   }
 });
+
 // alias под фронтовый TRIM:'/api/trim25' (ровно 2.5s)
 app.post("/api/trim25", upload.single("file"), async (req, res) => {
   try {
@@ -271,6 +285,9 @@ await new Promise((resolve, reject) => {
 
 /* ====================== WATERMARK ====================== */
 app.post("/api/watermark-video", upload.single("file"), async (req, res) => {
+  // CORS
+  res.setHeader("Access-Control-Allow-Origin", "*");
+
   try {
     const rawLabel = (req.body?.label || "HI-AI").toString();
     const label = rawLabel.replace(/'/g, "\\'");
@@ -293,29 +310,27 @@ app.post("/api/watermark-video", upload.single("file"), async (req, res) => {
       `x=w-tw-14*${SCALE}:y=h-th-14*${SCALE}`;
 
     await new Promise((resolve, reject) => {
-  ffmpeg(inPath)
-    .videoFilters(draw)
-    .outputOptions([
-      "-movflags +faststart",
-      "-pix_fmt yuv420p",
-      "-c:v libx264",
-      "-profile:v high",
-      "-level 4.1",
-      "-preset veryfast",
-      "-crf 18",
-      "-maxrate 12M",
-      "-bufsize 24M",
-      "-an"
-    ])
-    .on("end", resolve)
-    .on("error", reject)
-    .save(outPath);
-});
-
+      ffmpeg(inPath)
+        .videoFilters(draw)
+        .outputOptions([
+          "-movflags +faststart",
+          "-pix_fmt yuv420p",
+          "-c:v libx264",
+          "-preset veryfast",
+          "-crf 18",
+          "-maxrate 12M",
+          "-bufsize 24M",
+          "-an"
+        ])
+        .on("end", resolve)
+        .on("error", reject)
+        .save(outPath);
+    });
 
     fs.unlink(inPath, () => {});
     return res.json({ ok:true, url: absUrl(req, `/uploads/${outName}`) });
   } catch (e) {
+    console.error(e);
     return res.status(500).json({ ok:false, error:String(e.message||e) });
   }
 });
@@ -1176,6 +1191,7 @@ Return JSON:
 /* ====================== START ====================== */
 const PORT = process.env.PORT || 10000;
 app.listen(PORT, () => console.log(`HI-AI backend on :${PORT}`));
+
 
 
 
