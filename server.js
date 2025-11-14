@@ -940,90 +940,6 @@ app.post("/api/video-studio", async (req, res) => {
   }
 });
 
-  // ====================== IMAGE → VIDEO (WAN 2.5 FIX) ======================
-if (mode === "image2video") {
-  const fallbackSlug = (process.env.REPLICATE_MODEL_SLUG_I2V_HD || "").trim();
-  if (!fallbackSlug) {
-    return res.json({ ok:false, error:"No I2V model configured." });
-  }
-
-  // ГЛАВНОЕ: собираем image ПРАВИЛЬНО
-  let incomingImage =
-    body.image_data ||
-    body.image ||
-    body.image_data_url ||
-    body.image_url ||
-    "";
-
-  // Если data:URL — чиним
-  if (incomingImage && incomingImage.startsWith("data:")) {
-    const fixed = makeDataUrlSafe(incomingImage);
-    if (!fixed) return res.json({ ok:false, error:"Bad data URL" });
-    incomingImage = fixed;
-  }
-
-  // ОШИБКА 422 тут!
-  if (!incomingImage) {
-    return res.json({ ok:false, error:"Missing input image (image_data_url)" });
-  }
-
-  // PROMPT тоже нужен всегда
-  const finalPrompt = body.prompt || vprompt || "cinematic lighting, no text";
-
-  const inputWan = {
-    image: incomingImage,
-    prompt: finalPrompt,
-    negative_prompt: "text, watermark, logo, subtitles, letters",
-    resolution: "720p",
-    duration: 2.5,
-    enable_prompt_expansion: true
-  };
-
-  try {
-    // WAN требует ТОЛЬКО так
-    const job = await replicateCreateBySlug(fallbackSlug, { input: inputWan });
-
-    const done = await pollPredictionByUrl(job?.urls?.get, {
-      tries: 240,
-      delayMs: 1500
-    });
-
-    const out = done?.output;
-    const got = Array.isArray(out) ? out[0] : out;
-
-    if (!got) throw new Error("No output from WAN 2.5");
-
-    video_url = got;
-
-  } catch (e) {
-    console.error("WAN 2.5 ERROR:", e?.response?.data || e);
-    return res.json({ ok:false, error:`WAN 2.5 ERROR: ${e.message || e}` });
-  }
-}
-
-
-
-    // ================= Финальный ответ =================
-    if (!video_url && !image_url) {
-      return res.json({ ok:false, error:"Nothing generated" });
-    }
-
-    return res.json({
-      ok: true,
-      mode: modeUsed,
-      video_url,
-      image_url,
-      ratio,
-      seconds: secs,
-      size,
-    });
-  } catch (e) {
-    console.error("VIDEO_STUDIO ERROR", e);
-    return res.status(500).json({ ok:false, error:String(e.message || e) });
-  }
-});
-
-
 
 /* ====================== VIDEO REELS ====================== */
 app.post("/api/video-reels", async (req, res) => {
@@ -1222,6 +1138,7 @@ Return JSON:
 /* ====================== START ====================== */
 const PORT = process.env.PORT || 10000;
 app.listen(PORT, () => console.log(`HI-AI backend on :${PORT}`));
+
 
 
 
