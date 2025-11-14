@@ -828,70 +828,95 @@ app.post("/api/video-studio", async (req, res) => {
   try {
     const body = readBody(req.body);
 
-    // FRONT отправляет "i2v" → значит image → video
-    const rawMode = String(body.mode || "").toLowerCase();
-    const mode = rawMode === "i2v" ? "image2video" :
-                 rawMode === "video" ? "video" :
-                 "image2video";
+    // FRONT шлёт "i2v" → картинка → видео
+    const rawMode = String(body.mode || "i2v").toLowerCase();
+    const mode =
+      rawMode === "i2v" || rawMode === "image2video"
+        ? "image2video"
+        : rawMode === "video"
+        ? "video"
+        : "image2video";
 
-    let video_url = null;
-
-    /* ================= IMAGE → VIDEO (WAN 2.5) ================= */
-    if (mode === "image2video") {
-
-      const fallbackSlug = (process.env.REPLICATE_MODEL_SLUG_I2V_HD || "").trim();
-      if (!fallbackSlug) {
-        return res.json({ ok:false, error:"No I2V model configured." });
-      }
-
-      // Берём картинку ТОЛЬКО отсюда
-      let incomingImage =
-        body.image_data_url ||
-        body.image_url ||
-        body.image ||
-        "";
-
-      if (!incomingImage) {
-        return res.json({ ok:false, error:"Missing image_data_url" });
-      }
-
-      // Чиним data:URL
-      if (incomingImage.startsWith("data:")) {
-        const fixed = makeDataUrlSafe(incomingImage);
-        if (!fixed) return res.json({ ok:false, error:"Bad data URL" });
-        incomingImage = fixed;
-      }
-
-      const finalPrompt = body.prompt || "cinematic lighting";
-
-      const inputWan = {
-        image: incomingImage,
-        prompt: finalPrompt,
-        negative_prompt: "text, watermark, logo, subtitles, letters",
-        resolution: "720p",
-        duration: 2.5,
-        enable_prompt_expansion: true
-      };
-
-      try {
-        const job = await replicateCreateBySlug(fallbackSlug, { input: inputWan });
-
-        const done = await pollPredictionByUrl(job?.urls?.get, {
-          tries: 240,
-          delayMs: 1500
-        });
-
-        const out = done?.output;
-        const got = Array.isArray(out) ? out[0] : out;
-        if (!got) throw new Error("No output from WAN 2.5");
-
-        video_url = got;
-
-      } catch (e) {
-        console.error("WAN 2.5 ERROR:", e?.response?.data || e);
-        return res.json({ ok:false, error:`WAN 2.5 ERROR: ${e.message || e}` });
-      }
+    // этот эндпоинт сейчас только под image→video
+    if (mode === "video") {
+      return res.json({
+        ok: false,
+        error: "Video mode is handled on /api/zoom2s",
+      });
     }
+
+    // =============== IMAGE → VIDEO (WAN 2.5) ===============
+    const fallbackSlug = (process.env.REPLICATE_MODEL_SLUG_I2V_HD || "").trim();
+    if (!fallbackSlug) {
+      return res.json({ ok: false, error: "No I2V model configured." });
+    }
+
+    // Берём картинку из тела запроса
+    let incomingImage =
+      body.image_data_url ||  // то, что ты шлёшь из HTML
+      body.image ||           // запасной вариант
+      body.image_url ||       // запасной вариант
+      "";
+
+    if (!incomingImage) {
+      return res.json({ ok: false, error: "Missing image_data_url" });
+    }
+
+    // Чиним data:URL
+    if (incomingImage.startsWith("data:")) {
+      const fixed = makeDataUrlSafe(incomingImage);
+      if (!fixed) return res.json({ ok: false, error: "Bad data URL" });
+      incomingImage = fixed;
+    }
+
+    // PROMPT — ОБЯЗАТЕЛЬНО
+    const finalPrompt = (
+      body.prompt ||
+      body.idea ||
+      "cinematic lighting, smooth camera motion"
+    ).toString();
+
+    const inputWan = {
+      image: incomingImage,
+      prompt: finalPrompt,
+      negative_prompt: "text, watermark, logo, subtitles, letters",
+      resolution: "720p",
+      duration: 2.5,
+      enable_prompt_expansion: true,
+    };
+
+    try {
+      // ВАЖНО: без лишнего { input: ... }
+      const job = await replicateCreateBySlug(fallbackSlug, inputWan);
+
+      const done = await pollPredictionByUrl(job?.urls?.get, {
+        tries: 240,
+        delayMs: 1500,
+      });
+
+      const out = done?.output;
+      const got = Array.isArray(out) ? out[0] : out;
+
+      if (!got) throw new Error("No output from WAN 2.5");
+
+      return res.json({
+        ok: true,
+        video_url: got,
+      });
+    } catch (e) {
+      console.error("WAN 2.5 ERROR:", e?.response?.data || e);
+      return res.json({
+        ok: false,
+        error: `WAN 2.5 ERROR: ${e.message || e}`,
+      });
+    }
+  } catch (e) {
+    console.error("VIDEO_STUDIO ERROR", e);
+    return res
+      .status(500)
+      .json({ ok: false, error: String(e.message || e) });
+  }
+});
 
     /* ================= VIDEO → TRIM/ZOOM ================= */
     if (mode === "video") {
@@ -1138,6 +1163,7 @@ Return JSON:
 /* ====================== START ====================== */
 const PORT = process.env.PORT || 10000;
 app.listen(PORT, () => console.log(`HI-AI backend on :${PORT}`));
+
 
 
 
