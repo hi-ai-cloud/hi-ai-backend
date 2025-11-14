@@ -901,12 +901,11 @@ app.post("/api/video-studio", async (req, res) => {
 
     // --- картинка для image2video ---
     let incomingImage =
-  (body.image_data && String(body.image_data).trim()) ||    // ← ДОБАВЛЕНО
-  (body.image_data_url && String(body.image_data_url).trim()) ||
-  (body.image && String(body.image).trim()) ||
-  (body.image_url && String(body.image_url).trim()) ||
+  body.image_data ||
+  body.image ||
+  body.image_data_url ||
+  body.image_url ||
   "";
-
 
     if (mode === "image2video" && !incomingImage) {
       return res.json({ ok:false, error:"Provide 'image_url' or 'image_data_url' (or 'image')" });
@@ -995,26 +994,49 @@ app.post("/api/video-studio", async (req, res) => {
       }
     }
 
-   // IMAGE → VIDEO (WAN 2.5 FIX + 5s BASE)
+  // ====================== IMAGE → VIDEO (WAN 2.5 FIX) ======================
 if (mode === "image2video") {
   const fallbackSlug = (process.env.REPLICATE_MODEL_SLUG_I2V_HD || "").trim();
   if (!fallbackSlug) {
     return res.json({ ok:false, error:"No I2V model configured." });
   }
 
-  try {
+  // ГЛАВНОЕ: собираем image ПРАВИЛЬНО
+  let incomingImage =
+    body.image_data ||
+    body.image ||
+    body.image_data_url ||
+    body.image_url ||
+    "";
+
+  // Если data:URL — чиним
+  if (incomingImage && incomingImage.startsWith("data:")) {
+    const fixed = makeDataUrlSafe(incomingImage);
+    if (!fixed) return res.json({ ok:false, error:"Bad data URL" });
+    incomingImage = fixed;
+  }
+
+  // ОШИБКА 422 тут!
+  if (!incomingImage) {
+    return res.json({ ok:false, error:"Missing input image (image_data_url)" });
+  }
+
+  // PROMPT тоже нужен всегда
+  const finalPrompt = body.prompt || vprompt || "cinematic lighting, no text";
+
   const inputWan = {
-  image: incomingImage,
-  prompt: body.prompt || vprompt || "cinematic wallpaper",   // ← ФИКС
+    image: incomingImage,
+    prompt: finalPrompt,
+    negative_prompt: "text, watermark, logo, subtitles, letters",
+    resolution: "720p",
+    duration: 2.5,
+    enable_prompt_expansion: true
+  };
 
-      negative_prompt: "text, logo, watermark, letters, subtitles",
-      resolution: "720p",
-      duration: 5,                 // ВАЖНО: WAN 2.5 ест ТОЛЬКО 5 или 10
-      enable_prompt_expansion: true
-    };
+  try {
+    // WAN требует ТОЛЬКО так
+    const job = await replicateCreateBySlug(fallbackSlug, { input: inputWan });
 
-    // ВАЖНО: через { input: ... }
-    const job  = await replicateCreateBySlug(fallbackSlug, { input: inputWan });
     const done = await pollPredictionByUrl(job?.urls?.get, {
       tries: 240,
       delayMs: 1500
@@ -1024,13 +1046,15 @@ if (mode === "image2video") {
     const got = Array.isArray(out) ? out[0] : out;
 
     if (!got) throw new Error("No output from WAN 2.5");
-    video_url = got; // сюда кладём URL
+
+    video_url = got;
 
   } catch (e) {
     console.error("WAN 2.5 ERROR:", e?.response?.data || e);
     return res.json({ ok:false, error:`WAN 2.5 ERROR: ${e.message || e}` });
   }
 }
+
 
 
     // ================= Финальный ответ =================
@@ -1252,6 +1276,7 @@ Return JSON:
 /* ====================== START ====================== */
 const PORT = process.env.PORT || 10000;
 app.listen(PORT, () => console.log(`HI-AI backend on :${PORT}`));
+
 
 
 
