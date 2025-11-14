@@ -993,40 +993,42 @@ app.post("/api/video-studio", async (req, res) => {
       }
     }
 
-    // ================= IMAGE → VIDEO (WAN 2.5, 720p, 2.5s) =================
-    if (mode === "image2video") {
-      const fallbackSlug = (process.env.REPLICATE_MODEL_SLUG_I2V_HD || "").trim();
-      if (!fallbackSlug) {
-        return res.json({ ok:false, error:"No I2V model configured." });
-      }
+   // IMAGE → VIDEO (WAN 2.5 FIX + 5s BASE)
+if (mode === "image2video") {
+  const fallbackSlug = (process.env.REPLICATE_MODEL_SLUG_I2V_HD || "").trim();
+  if (!fallbackSlug) {
+    return res.json({ ok:false, error:"No I2V model configured." });
+  }
 
-      try {
-        const inputWan = {
-          image: incomingImage,
-          prompt: vprompt,
-          negative_prompt: "text, logo, watermark, letters, subtitles",
-          resolution: "720p",           // строго 720p tier
-          duration: secs || 2.5,        // 2.5 по умолчанию
-          enable_prompt_expansion: true,
-        };
+  try {
+    const inputWan = {
+      image: incomingImage,
+      prompt: vprompt,
+      negative_prompt: "text, logo, watermark, letters, subtitles",
+      resolution: "720p",
+      duration: 5,                 // ВАЖНО: WAN 2.5 ест ТОЛЬКО 5 или 10
+      enable_prompt_expansion: true
+    };
 
-        const job  = await replicateCreateBySlug(fallbackSlug, { input: inputWan });
-        const done = await pollPredictionByUrl(job?.urls?.get, {
-          tries: 240,
-          delayMs: 1500,
-        });
+    // ВАЖНО: через { input: ... }
+    const job  = await replicateCreateBySlug(fallbackSlug, { input: inputWan });
+    const done = await pollPredictionByUrl(job?.urls?.get, {
+      tries: 240,
+      delayMs: 1500
+    });
 
-        const out = done?.output;
-        const got = Array.isArray(out) ? out[0] : out;
+    const out = done?.output;
+    const got = Array.isArray(out) ? out[0] : out;
 
-        if (!got) throw new Error("No output from WAN 2.5");
-        video_url = got;
-        modeUsed  = "image2video";
-      } catch (e) {
-        console.error("WAN 2.5 I2V error", e);
-        return res.json({ ok:false, error:"WAN 2.5 ERROR" });
-      }
-    }
+    if (!got) throw new Error("No output from WAN 2.5");
+    video_url = got; // сюда кладём URL
+
+  } catch (e) {
+    console.error("WAN 2.5 ERROR:", e?.response?.data || e);
+    return res.json({ ok:false, error:`WAN 2.5 ERROR: ${e.message || e}` });
+  }
+}
+
 
     // ================= Финальный ответ =================
     if (!video_url && !image_url) {
@@ -1247,6 +1249,7 @@ Return JSON:
 /* ====================== START ====================== */
 const PORT = process.env.PORT || 10000;
 app.listen(PORT, () => console.log(`HI-AI backend on :${PORT}`));
+
 
 
 
