@@ -900,99 +900,102 @@ app.post("/api/video-studio", async (req, res) => {
     }
 
     // --- картинка для image2video ---
-    let incomingImage =
-  body.image_data ||
-  body.image ||
-  body.image_data_url ||
-  body.image_url ||
-  "";
+let incomingImage =
+  body.image_data_url ||   // <-- ОСНОВНОЕ ПОЛЕ
+  body.image ||            // fallback
+  body.image_url ||        // fallback
+  "";                      // НИКАКОЙ body.image_data !!!
 
-    if (mode === "image2video" && !incomingImage) {
-      return res.json({ ok:false, error:"Provide 'image_url' or 'image_data_url' (or 'image')" });
-    }
+if (mode === "image2video" && !incomingImage) {
+  return res.json({ ok:false, error:"Provide image_data_url or image_url" });
+}
 
-    if (incomingImage && incomingImage.startsWith("data:")) {
-      const fixed = makeDataUrlSafe(incomingImage);
-      if (!fixed) return res.json({ ok:false, error:"Bad data URL" });
-      incomingImage = fixed;
-    } else if (incomingImage && !/^https?:\/\//i.test(incomingImage)) {
-      return res.json({ ok:false, error:"image_url must be https or data:URL" });
-    }
+if (incomingImage.startsWith("data:")) {
+  const fixed = makeDataUrlSafe(incomingImage);
+  if (!fixed) return res.json({ ok:false, error:"Bad data URL" });
+  incomingImage = fixed;
+} else if (!/^https?:\/\//i.test(incomingImage)) {
+  return res.json({ ok:false, error:"image_url must be https or data:URL" });
+}
 
-    const videoSlug = String(
-      body.video_model_slug ||
-      body.replicate_video_slug ||
-      body.REPLICATE_MODEL_SLUG_VIDEO ||
-      ""
-    ).trim();
+const videoSlug = String(
+  body.video_model_slug ||
+  body.replicate_video_slug ||
+  body.REPLICATE_MODEL_SLUG_VIDEO ||
+  ""
+).trim();
 
-    let video_url = null;
-    let image_url = null;
-    let modeUsed  = mode;
+let video_url = null;
+let image_url = null;
+let modeUsed  = mode;
 
-    // ================= TEXT → VIDEO =================
-    if (mode === "text2video") {
-      const verVideo = (process.env.REPLICATE_MODEL_VERSION_VIDEO || "").trim();
-      if (!verVideo) {
-        return res.json({ ok:false, error:"Set REPLICATE_MODEL_VERSION_VIDEO" });
-      }
+// ================= TEXT → VIDEO =================
+if (mode === "text2video") {
+  const verVideo = (process.env.REPLICATE_MODEL_VERSION_VIDEO || "").trim();
+  if (!verVideo) {
+    return res.json({ ok:false, error:"Set REPLICATE_MODEL_VERSION_VIDEO" });
+  }
 
-      const inputV = {
-        prompt: vprompt,
-        size,
-        duration: secs,
-        negative_prompt: "text, logo, watermark, letters, subtitles",
-        enable_prompt_expansion: true,
-      };
+  const inputV = {
+    prompt: vprompt,
+    size,
+    duration: secs,
+    negative_prompt: "text, logo, watermark, letters, subtitles",
+    enable_prompt_expansion: true,
+  };
+
+  try {
+    const job = await replicatePredict(verVideo, inputV);
+    video_url = typeof job.output === "string"
+      ? job.output
+      : Array.isArray(job.output)
+        ? job.output[0]
+        : null;
+  } catch (e) {
+    console.error("TEXT2VIDEO error", e);
+  }
+
+  // fallback → SDXL / FLUX
+  if (
+    !video_url &&
+    (process.env.REPLICATE_MODEL_VERSION_SDXL || process.env.REPLICATE_MODEL_VERSION_FLUX)
+  ) {
+    const useFlux  = style === "cartoon3d" || style === "illustrated";
+    const verStill = useFlux
+      ? process.env.REPLICATE_MODEL_VERSION_FLUX
+      : process.env.REPLICATE_MODEL_VERSION_SDXL;
+
+    if (verStill) {
+      const trimmed = verStill.trim();
+      const inputI = useFlux
+        ? {
+            prompt: vprompt,
+            go_fast: false,
+            megapixels: "1",
+            num_outputs: 1,
+            output_format: "png",
+            output_quality: 90,
+          }
+        : {
+            prompt: vprompt,
+            width: w,
+            height: h,
+            num_inference_steps: 30,
+            guidance_scale: 7.0,
+            num_outputs: 1,
+          };
 
       try {
-        const job = await replicatePredict(verVideo, inputV);
-        video_url = typeof job.output === "string"
-          ? job.output
-          : Array.isArray(job.output)
-            ? job.output[0]
-            : null;
+        const jobI = await replicatePredict(trimmed, inputI);
+        image_url  = Array.isArray(jobI.output) ? jobI.output[0] : jobI.output;
+        modeUsed   = "image_fallback";
       } catch (e) {
-        console.error("TEXT2VIDEO error", e);
-      }
-
-      // Если видео не получилось — fallback в картинку (SDXL/FLUX)
-      if (!video_url && (process.env.REPLICATE_MODEL_VERSION_SDXL || process.env.REPLICATE_MODEL_VERSION_FLUX)) {
-        const useFlux  = style === "cartoon3d" || style === "illustrated";
-        const verStill = useFlux
-          ? process.env.REPLICATE_MODEL_VERSION_FLUX
-          : process.env.REPLICATE_MODEL_VERSION_SDXL;
-
-        if (verStill) {
-          const trimmed = verStill.trim();
-          const inputI = useFlux
-            ? {
-                prompt: vprompt,
-                go_fast: false,
-                megapixels: "1",
-                num_outputs: 1,
-                output_format: "png",
-                output_quality: 90,
-              }
-            : {
-                prompt: vprompt,
-                width: w,
-                height: h,
-                num_inference_steps: 30,
-                guidance_scale: 7.0,
-                num_outputs: 1,
-              };
-
-          try {
-            const jobI = await replicatePredict(trimmed, inputI);
-            image_url  = Array.isArray(jobI.output) ? jobI.output[0] : jobI.output;
-            modeUsed   = "image_fallback";
-          } catch (e) {
-            console.error("TEXT2VIDEO fallback image error", e);
-          }
-        }
+        console.error("TEXT2VIDEO fallback image error", e);
       }
     }
+  }
+}
+
 
   // ====================== IMAGE → VIDEO (WAN 2.5 FIX) ======================
 if (mode === "image2video") {
@@ -1276,6 +1279,7 @@ Return JSON:
 /* ====================== START ====================== */
 const PORT = process.env.PORT || 10000;
 app.listen(PORT, () => console.log(`HI-AI backend on :${PORT}`));
+
 
 
 
