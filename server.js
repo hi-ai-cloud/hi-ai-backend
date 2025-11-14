@@ -235,7 +235,7 @@ app.post("/api/trim25", upload.single("file"), async (req, res) => {
 app.post("/api/zoom2s", upload.single("file"), async (req, res) => {
   try {
     if (!req.file) return res.status(400).json({ ok:false, error:"no_file" });
-    const duration = Math.min(Math.max(parseFloat(req.body?.duration || "2.0"), 1.0), 5.0);
+    const duration = Math.min(Math.max(parseFloat(req.body?.duration || "2.5"), 1.0), 5.0);
     const fps = Math.min(Math.max(parseInt(req.body?.fps || "30",10), 15), 60);
     const factor = Math.min(Math.max(parseFloat(req.body?.factor || "1.3"), 1.0), 2.0);
     const frames = Math.round(duration * fps);
@@ -828,39 +828,40 @@ app.post("/api/video-studio", async (req, res) => {
   try {
     const body = readBody(req.body);
 
+    // --- helpers ---
     const mapRatioToWanSize = (ratio) => {
-  // ВСЕГДА 720p tier для WAN (экономим деньги, качество почти как 1080)
-  const r = String(ratio || "9:16").replace("-", ":");
-  if (r === "16:9") return "1280*720";   // 16:9 @ 720p
-  if (r === "1:1")  return "720*720";    // 1:1 @ 720p
-  return "720*1280";                     // 9:16 @ 720p
-};
+      // ВСЕГДА 720p tier для WAN
+      const r = String(ratio || "9:16").replace("-", ":");
+      if (r === "16:9") return "1280*720";  // 16:9 @ 720p
+      if (r === "1:1")  return "720*720";   // 1:1 @ 720p
+      return "720*1280";                    // 9:16 @ 720p
+    };
 
-// Разрешаем ДРОБНЫЕ секунды (2.5, 3.2 и т.д.), а не только 5/10
-const fitDurationToWan = (sec) => {
-  const s = Number(sec ?? 2.5);
-  if (!Number.isFinite(s) || s <= 0) return 2.5; // дефолт — 2.5s
-  if (s > 10) return 10;                          // максимум 10s (лимит WAN)
-  return s;                                       // 2.5, 3, 4.7 — всё ок
-};
+    // Дробные секунды ок (2.5, 3.7 и т.д.)
+    const fitDurationToWan = (sec) => {
+      const s = Number(sec ?? 2.5);
+      if (!Number.isFinite(s) || s <= 0) return 2.5;
+      if (s > 10) return 10;
+      return s;
+    };
 
-const ratioToWH = (ratio) => {
-  // это только для статики/картинок — тут оставляем FullHD размеры
-  const r = String(ratio || "9:16").replace("-", ":");
-  if (r === "16:9") return [1920, 1080];
-  if (r === "1:1")  return [1080, 1080];
-  return [1080, 1920];
-};
+    const ratioToWH = (ratio) => {
+      // Для статики (SDXL/FLUX) — FullHD размеры
+      const r = String(ratio || "9:16").replace("-", ":");
+      if (r === "16:9") return [1920, 1080];
+      if (r === "1:1")  return [1080, 1080];
+      return [1080, 1920];
+    };
 
     const buildVPrompt = ({ idea, style, ratio, seconds, category, subcategory }) => {
       const topic = [category || "General", subcategory || ""].filter(Boolean).join(" • ");
       const hints = {
-        auto: "Let AI pick style. No on-frame text. Text-safe area.",
-        realistic: "Photo-realistic, cinematic warm light, shallow depth.",
-        cartoon3d: "3D toon shading, rounded forms, glossy surfaces.",
+        auto:        "Let AI pick style. No on-frame text. Text-safe area.",
+        realistic:   "Photo-realistic, cinematic warm light, shallow depth.",
+        cartoon3d:   "3D toon shading, rounded forms, glossy surfaces.",
         illustrated: "Flat vector, bold simple shapes, warm palette.",
-        futuristic: "Futuristic neon/glass, volumetric light, bokeh.",
-        canva: "Minimal beige+orange (#E87D24,#F4E6CF), clean bg.",
+        futuristic:  "Futuristic neon/glass, volumetric light, bokeh.",
+        canva:       "Minimal beige+orange (#E87D24,#F4E6CF), clean bg.",
       };
       const s = hints[(style || "auto").toLowerCase()] || hints.auto;
       return [
@@ -873,24 +874,42 @@ const ratioToWH = (ratio) => {
       ].join(" ");
     };
 
-    const mode  = String(body.mode || "text2video").toLowerCase();
-    const idea  = String(body.idea || body.prompt || "").trim();
-    const style = String(body.style || "auto").toLowerCase();
-    const ratio = String(body.ratio || "9:16").replace("-", ":");
-    const secs  = fitDurationToWan(body.video_seconds ?? body.duration_seconds ?? 2.5);
-    const size  = mapRatioToWanSize(ratio);
-    const [w, h] = ratioToWH(ratio);
+    // --- входные параметры ---
+    const rawMode = String(body.mode || "text2video").toLowerCase();
+    // Фронт шлёт "i2v" — мапим в image2video
+    const mode    = rawMode === "i2v" ? "image2video" : rawMode;
+
+    const idea    = String(body.idea || body.prompt || "").trim();
+    const style   = String(body.style || "auto").toLowerCase();
+    const ratio   = String(body.ratio || "9:16").replace("-", ":");
+    const secs    = fitDurationToWan(body.video_seconds ?? body.duration_seconds ?? 2.5);
+    const size    = mapRatioToWanSize(ratio);
+    const [w, h]  = ratioToWH(ratio);
 
     const vprompt = buildVPrompt({
-      idea, style, ratio, seconds: secs, category: body.category, subcategory: body.subcategory,
+      idea,
+      style,
+      ratio,
+      seconds: secs,
+      category: body.category,
+      subcategory: body.subcategory,
     });
 
-    if (mode !== "image2video" && !idea) return res.json({ ok:false, error:"Missing 'idea' for text2video" });
+    if (mode !== "image2video" && !idea) {
+      return res.json({ ok: false, error: "Missing 'idea' for text2video" });
+    }
 
-    let incomingImage = (body.image_data_url && String(body.image_data_url).trim()) ||
-                        (body.image && String(body.image).trim()) ||
-                        (body.image_url && String(body.image_url).trim()) || "";
-    if (mode === "image2video" && !incomingImage) return res.json({ ok:false, error:"Provide 'image_url' or 'image_data_url' (or 'image')" });
+    // --- картинка для image2video ---
+    let incomingImage =
+      (body.image_data_url && String(body.image_data_url).trim()) ||
+      (body.image && String(body.image).trim()) ||
+      (body.image_url && String(body.image_url).trim()) ||
+      "";
+
+    if (mode === "image2video" && !incomingImage) {
+      return res.json({ ok:false, error:"Provide 'image_url' or 'image_data_url' (or 'image')" });
+    }
+
     if (incomingImage && incomingImage.startsWith("data:")) {
       const fixed = makeDataUrlSafe(incomingImage);
       if (!fixed) return res.json({ ok:false, error:"Bad data URL" });
@@ -899,72 +918,136 @@ const ratioToWH = (ratio) => {
       return res.json({ ok:false, error:"image_url must be https or data:URL" });
     }
 
-    const videoSlug = String(body.video_model_slug || body.replicate_video_slug || body.REPLICATE_MODEL_SLUG_VIDEO || "").trim();
+    const videoSlug = String(
+      body.video_model_slug ||
+      body.replicate_video_slug ||
+      body.REPLICATE_MODEL_SLUG_VIDEO ||
+      ""
+    ).trim();
 
     let video_url = null;
     let image_url = null;
-    let modeUsed = mode;
+    let modeUsed  = mode;
 
-    // TEXT -> VIDEO
+    // ================= TEXT → VIDEO =================
     if (mode === "text2video") {
       const verVideo = (process.env.REPLICATE_MODEL_VERSION_VIDEO || "").trim();
-      if (!verVideo) return res.json({ ok:false, error:"Set REPLICATE_MODEL_VERSION_VIDEO" });
+      if (!verVideo) {
+        return res.json({ ok:false, error:"Set REPLICATE_MODEL_VERSION_VIDEO" });
+      }
 
-      const inputV = { prompt: vprompt, size, duration: secs, negative_prompt:"text, logo, watermark, letters, subtitles", enable_prompt_expansion:true };
+      const inputV = {
+        prompt: vprompt,
+        size,
+        duration: secs,
+        negative_prompt: "text, logo, watermark, letters, subtitles",
+        enable_prompt_expansion: true,
+      };
+
       try {
         const job = await replicatePredict(verVideo, inputV);
-        video_url = typeof job.output === "string" ? job.output : Array.isArray(job.output) ? job.output[0] : null;
-      } catch {}
+        video_url = typeof job.output === "string"
+          ? job.output
+          : Array.isArray(job.output)
+            ? job.output[0]
+            : null;
+      } catch (e) {
+        console.error("TEXT2VIDEO error", e);
+      }
 
+      // Если видео не получилось — fallback в картинку (SDXL/FLUX)
       if (!video_url && (process.env.REPLICATE_MODEL_VERSION_SDXL || process.env.REPLICATE_MODEL_VERSION_FLUX)) {
-        const useFlux = style === "cartoon3d" || style === "illustrated";
-        const verStill = useFlux ? process.env.REPLICATE_MODEL_VERSION_FLUX : process.env.REPLICATE_MODEL_VERSION_SDXL;
+        const useFlux  = style === "cartoon3d" || style === "illustrated";
+        const verStill = useFlux
+          ? process.env.REPLICATE_MODEL_VERSION_FLUX
+          : process.env.REPLICATE_MODEL_VERSION_SDXL;
+
         if (verStill) {
+          const trimmed = verStill.trim();
           const inputI = useFlux
-            ? { prompt: vprompt, go_fast:false, megapixels:"1", num_outputs:1, output_format:"png", output_quality:90 }
-            : { prompt: vprompt, width:w, height:h, num_inference_steps:30, guidance_scale:7.0, num_outputs:1 };
+            ? {
+                prompt: vprompt,
+                go_fast: false,
+                megapixels: "1",
+                num_outputs: 1,
+                output_format: "png",
+                output_quality: 90,
+              }
+            : {
+                prompt: vprompt,
+                width: w,
+                height: h,
+                num_inference_steps: 30,
+                guidance_scale: 7.0,
+                num_outputs: 1,
+              };
+
           try {
-            const jobI = await replicatePredict(verStill.trim(), inputI);
-            image_url = Array.isArray(jobI.output) ? jobI.output[0] : jobI.output;
-            modeUsed = "image_fallback";
-          } catch {}
+            const jobI = await replicatePredict(trimmed, inputI);
+            image_url  = Array.isArray(jobI.output) ? jobI.output[0] : jobI.output;
+            modeUsed   = "image_fallback";
+          } catch (e) {
+            console.error("TEXT2VIDEO fallback image error", e);
+          }
         }
       }
     }
 
-    // IMAGE → VIDEO (WAN 2.5 FIX + 2.5 SEC)
-if (mode === "image2video") {
-  const fallbackSlug = (process.env.REPLICATE_MODEL_SLUG_I2V_HD || "").trim();
-  if (!fallbackSlug) {
-    return res.json({ ok:false, error:"No I2V model configured." });
-  }
+    // ================= IMAGE → VIDEO (WAN 2.5, 720p, 2.5s) =================
+    if (mode === "image2video") {
+      const fallbackSlug = (process.env.REPLICATE_MODEL_SLUG_I2V_HD || "").trim();
+      if (!fallbackSlug) {
+        return res.json({ ok:false, error:"No I2V model configured." });
+      }
 
-  try {
-    const inputWan = {
-      image: incomingImage,
-      prompt: vprompt,
-      negative_prompt: "text, logo, watermark, letters, subtitles",
-      resolution: "720p",
-      duration: 2.5,
-      enable_prompt_expansion: true
-    };
+      try {
+        const inputWan = {
+          image: incomingImage,
+          prompt: vprompt,
+          negative_prompt: "text, logo, watermark, letters, subtitles",
+          resolution: "720p",           // строго 720p tier
+          duration: secs || 2.5,        // 2.5 по умолчанию
+          enable_prompt_expansion: true,
+        };
 
-    const job  = await replicateCreateBySlug(fallbackSlug, inputWan);
-    const done = await pollPredictionByUrl(job?.urls?.get, {
-      tries: 240,
-      delayMs: 1500
+        const job  = await replicateCreateBySlug(fallbackSlug, { input: inputWan });
+        const done = await pollPredictionByUrl(job?.urls?.get, {
+          tries: 240,
+          delayMs: 1500,
+        });
+
+        const out = done?.output;
+        const got = Array.isArray(out) ? out[0] : out;
+
+        if (!got) throw new Error("No output from WAN 2.5");
+        video_url = got;
+        modeUsed  = "image2video";
+      } catch (e) {
+        console.error("WAN 2.5 I2V error", e);
+        return res.json({ ok:false, error:"WAN 2.5 ERROR" });
+      }
+    }
+
+    // ================= Финальный ответ =================
+    if (!video_url && !image_url) {
+      return res.json({ ok:false, error:"Nothing generated" });
+    }
+
+    return res.json({
+      ok: true,
+      mode: modeUsed,
+      video_url,
+      image_url,
+      ratio,
+      seconds: secs,
+      size,
     });
-
-    const out = done?.output;
-    const got = Array.isArray(out) ? out[0] : out;
-
-    if (!got) throw new Error("No output from WAN 2.5");
-    video_url = got;
-
   } catch (e) {
-    return res.json({ ok:false, error:"WAN 2.5 ERROR" });
+    console.error("VIDEO_STUDIO ERROR", e);
+    return res.status(500).json({ ok:false, error:String(e.message || e) });
   }
-}
+});
+
 
 
 /* ====================== VIDEO REELS ====================== */
@@ -1164,6 +1247,7 @@ Return JSON:
 /* ====================== START ====================== */
 const PORT = process.env.PORT || 10000;
 app.listen(PORT, () => console.log(`HI-AI backend on :${PORT}`));
+
 
 
 
