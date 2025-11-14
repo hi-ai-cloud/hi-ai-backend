@@ -1,4 +1,5 @@
 // HI-AI HUB — Unified Backend (Brand Post + Image Studio + Video Studio + Video Reels)
+// Express + OpenAI + Replicate (polling, data:URL safe, model routing fixed for Replicate 2025)
 
 import express from "express";
 import cors from "cors";
@@ -16,39 +17,16 @@ import multer from "multer";
 import path from "path";
 import fs from "fs";
 
-// ---- H.264 @ 60 fps, High/4.2, качественный поток близко к CapCut
-const H264_60FPS_OPTS = [
-  "-r 60",
-  "-movflags +faststart",
-  "-pix_fmt yuv420p",
-  "-c:v libx264",
-  "-profile:v high",
-  "-level 4.2",
-  "-preset slow",
-  "-crf 18",
-  "-an"
-];
-
 const app = express();
 app.set("trust proxy", true);
 
-/* ======== ГЛОБАЛЬНЫЙ CORS ДЛЯ ВСЕГО БЭКЕНДА ======== */
-app.use((req, res, next) => {
-  res.header("Access-Control-Allow-Origin", "*");
-  res.header("Access-Control-Allow-Methods", "GET,POST,OPTIONS");
-  res.header("Access-Control-Allow-Headers", "Content-Type,X-API-Key,Accept");
-
-  if (req.method === "OPTIONS") {
-    return res.sendStatus(204);
-  }
-  next();
-});
-
-// лог запросов
-app.use((req, res, next) => {
-  console.log(new Date().toISOString(), req.method, req.url);
-  next();
-});
+// CORS + preflight (разрешаем X-API-Key и OPTIONS)
+app.use(cors({
+  origin: true,
+  methods: ["GET","POST","OPTIONS"],
+  allowedHeaders: ["Content-Type","X-API-Key","Accept"]
+}));
+app.options("*", (req,res)=>res.sendStatus(204));
 
 app.use(express.json({ limit: "30mb" }));
 
@@ -75,8 +53,7 @@ app.use("/uploads", express.static(UPLOAD_DIR, {
   }
 }));
 
-// multer (используй в /api/upload, /api/trim25, /api/zoom2s, /api/watermark-video)
-const upload = multer({ storage: multer.memoryStorage() });
+const upload = multer({ storage: multer.memoryStorage(), limits:{ fileSize: 100 * 1024 * 1024 }});
 
 /* ====================== UTILS ====================== */
 const sleep = (ms) => new Promise((r) => setTimeout(r, ms));
@@ -180,72 +157,85 @@ app.post("/api/upload", upload.single("file"), async (req, res) => {
   }
 });
 
-/* ====================== TRIM 2.5s @ 60fps ====================== */
-// — просто обрезка/перекодирование до 2.5s, 1080×1920, 60 fps
-app.post("/api/trim25", upload.single("file"), async (req, res) => {
+/* ====================== TRIM 2s / 2.5s ====================== */
+app.post("/api/trim2s", upload.single("file"), async (req, res) => {
   try {
-    if (!req.file) {
-      return res.status(400).json({ ok:false, error:"no_file" });
-    }
-
-    const inName  = `trim25_in_${Date.now()}.mp4`;
-    const outName = `trim25_out_${Date.now()}.mp4`;
-    const inPath  = path.join(UPLOAD_DIR, inName);
+    if (!req.file) return res.status(400).json({ ok:false, error:"no_file" });
+    const inName = `in_${Date.now()}.mp4`;
+    const outName = `out_${Date.now()}.mp4`;
+    const inPath = path.join(UPLOAD_DIR, inName);
     const outPath = path.join(UPLOAD_DIR, outName);
     fs.writeFileSync(inPath, req.file.buffer);
-
-    await new Promise((resolve, reject) => {
+    await new Promise((resolve, reject)=>{
       ffmpeg(inPath)
-        .outputOptions([
-          "-t", "2.5", // длина
-          "-vf", "scale=1080:1920:force_original_aspect_ratio=increase,crop=1080:1920",
-          "-r", "60",
-          "-movflags", "+faststart",
-          "-pix_fmt", "yuv420p",
-          "-c:v", "libx264",
-          "-preset", "slow",
-          "-crf", "18",
-          "-an"
-        ])
-        .on("end", resolve)
-        .on("error", reject)
+        .outputOptions(["-t 2.0","-movflags +faststart","-pix_fmt yuv420p","-c:v libx264","-preset veryfast","-crf 22","-an"])
+        .on("end", resolve).on("error", reject)
         .save(outPath);
     });
-
-    fs.unlink(inPath, () => {});
+    fs.unlink(inPath, ()=>{});
     return res.json({ ok:true, url: absUrl(req, `/uploads/${outName}`) });
-  } catch (e) {
-    console.error("trim25 error:", e);
-    return res.status(500).json({ ok:false, error:String(e.message || e) });
+  } catch(e){
+    console.error(e);
+    return res.status(500).json({ ok:false, error:String(e.message||e) });
+  }
+});
+// alias под фронтовый TRIM:'/api/trim25' (ровно 2.5s)
+app.post("/api/trim25", upload.single("file"), async (req, res) => {
+  try {
+    if (!req.file) return res.status(400).json({ ok:false, error:"no_file" });
+    const inName = `t25_in_${Date.now()}.mp4`;
+    const outName = `t25_out_${Date.now()}.mp4`;
+    const inPath = path.join(UPLOAD_DIR, inName);
+    const outPath = path.join(UPLOAD_DIR, outName);
+    fs.writeFileSync(inPath, req.file.buffer);
+    await new Promise((resolve, reject)=>{
+      ffmpeg(inPath)
+        .outputOptions(["-t 2.5","-r 60","-movflags +faststart","-pix_fmt yuv420p","-c:v libx264","-preset veryfast","-crf 22","-an"])
+        .on("end", resolve).on("error", reject)
+        .save(outPath);
+    });
+    fs.unlink(inPath, ()=>{});
+    return res.json({ ok:true, url: absUrl(req, `/uploads/${outName}`) });
+  } catch(e){
+    console.error(e);
+    return res.status(500).json({ ok:false, error:String(e.message||e) });
   }
 });
 
-/* ====================== ZOOM 2.5s @ 60fps (упрощённый) ====================== */
-// Сейчас БЕЗ сложного zoompan, просто как trim25.
-// Важно: стабильность и 60 fps. Зум, если надо, потом докрутим.
+/* ====================== ZOOM  (duration/fps/factor) ====================== */
+// принимает duration(1–5), fps(15–60), factor(1.0–2.0)
 app.post("/api/zoom2s", upload.single("file"), async (req, res) => {
   try {
-    if (!req.file) {
-      return res.status(400).json({ ok:false, error:"no_file" });
-    }
+    if (!req.file) return res.status(400).json({ ok:false, error:"no_file" });
+    const duration = Math.min(Math.max(parseFloat(req.body?.duration || "2.0"), 1.0), 5.0);
+    const fps = Math.min(Math.max(parseInt(req.body?.fps || "30",10), 15), 60);
+    const factor = Math.min(Math.max(parseFloat(req.body?.factor || "1.3"), 1.0), 2.0);
+    const frames = Math.round(duration * fps);
+    const step = (factor - 1.0) / frames;
 
-    const inName  = `zoom2s_in_${Date.now()}.mp4`;
-    const outName = `zoom2s_out_${Date.now()}.mp4`;
-    const inPath  = path.join(UPLOAD_DIR, inName);
+    const inName = `zin_${Date.now()}.mp4`;
+    const outName = `zout_${Date.now()}.mp4`;
+    const inPath = path.join(UPLOAD_DIR, inName);
     const outPath = path.join(UPLOAD_DIR, outName);
     fs.writeFileSync(inPath, req.file.buffer);
 
+    // zoompan: s=iw:ih (исправлено), fps фиксируем, длина = duration
+    const filter = [
+      `fps=${fps}`,
+      `scale=iw:ih`,
+      `zoompan=z='min(1.0+on*${step.toFixed(6)},${factor})':d=1:s=iw:ih:fps=${fps}`
+    ].join(",");
+
     await new Promise((resolve, reject) => {
       ffmpeg(inPath)
+        .videoFilters(filter)
         .outputOptions([
-          "-t", "2.5",
-          "-vf", "scale=1080:1920:force_original_aspect_ratio=increase,crop=1080:1920",
-          "-r", "60",
-          "-movflags", "+faststart",
-          "-pix_fmt", "yuv420p",
-          "-c:v", "libx264",
-          "-preset", "slow",
-          "-crf", "18",
+          `-t ${duration}`,
+          "-movflags +faststart",
+          "-pix_fmt yuv420p",
+          "-c:v libx264",
+          "-preset veryfast",
+          "-crf 22",
           "-an"
         ])
         .on("end", resolve)
@@ -253,11 +243,10 @@ app.post("/api/zoom2s", upload.single("file"), async (req, res) => {
         .save(outPath);
     });
 
-    fs.unlink(inPath, () => {});
+    fs.unlink(inPath, ()=>{});
     return res.json({ ok:true, url: absUrl(req, `/uploads/${outName}`) });
   } catch (e) {
-    console.error("zoom2s error:", e);
-    return res.status(500).json({ ok:false, error:String(e.message || e) });
+    return res.status(500).json({ ok:false, error:String(e.message||e) });
   }
 });
 
@@ -1145,12 +1134,3 @@ Return JSON:
 /* ====================== START ====================== */
 const PORT = process.env.PORT || 10000;
 app.listen(PORT, () => console.log(`HI-AI backend on :${PORT}`));
-
-
-
-
-
-
-
-
-
