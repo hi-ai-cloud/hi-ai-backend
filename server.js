@@ -901,10 +901,12 @@ app.post("/api/video-studio", async (req, res) => {
 
     // --- картинка для image2video ---
     let incomingImage =
-      (body.image_data_url && String(body.image_data_url).trim()) ||
-      (body.image && String(body.image).trim()) ||
-      (body.image_url && String(body.image_url).trim()) ||
-      "";
+  (body.image_data && String(body.image_data).trim()) ||
+  (body.image_data_url && String(body.image_data_url).trim()) ||
+  (body.image && String(body.image).trim()) ||
+  (body.image_url && String(body.image_url).trim()) ||
+  "";
+
 
     if (mode === "image2video" && !incomingImage) {
       return res.json({ ok:false, error:"Provide 'image_url' or 'image_data_url' (or 'image')" });
@@ -1249,6 +1251,7 @@ Return JSON:
 /* ====================== START ====================== */
 const PORT = process.env.PORT || 10000;
 app.listen(PORT, () => console.log(`HI-AI backend on :${PORT}`));
+
 
 
 
