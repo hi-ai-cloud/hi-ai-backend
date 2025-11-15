@@ -160,72 +160,6 @@ function makeDataUrlSafe(dataUrl) {
   return s;
 }
 
-/* ====================== TOKENS PER KEY ====================== */
-
-const KEY_DB = path.join(UPLOAD_DIR, "keys.json");
-
-let KEY_MAP = {};
-try {
-  KEY_MAP = JSON.parse(fs.readFileSync(KEY_DB, "utf8"));
-} catch {
-  KEY_MAP = {};
-}
-
-// keys.json будет примерно такой:
-// {
-//   "TEST100": { "max": 100, "used": 0, "note": "тестовый ключ на 100 генераций" },
-//   "VIP999":  { "credits": 999, "used": 0 }
-// }
-
-function saveKeys() {
-  try {
-    fs.writeFileSync(KEY_DB, JSON.stringify(KEY_MAP, null, 2));
-  } catch (e) {
-    console.error("KEY_DB save error:", e);
-  }
-}
-
-function getKeyInfo(rawKey) {
-  const k = String(rawKey || "").trim();
-  if (!k) return null;
-  return KEY_MAP[k] || null;
-}
-
-/**
- * Списываем токены с ключа.
- * amount — сколько токенов списать (по умолчанию 1).
- * Возвращает:
- *  { ok:true, remaining:<число или null> }  — всё ок
- *  { ok:false, error:"invalid_key" | "no_credits" | "missing_key" }
- */
-function consumeCredits(rawKey, amount = 1) {
-  const k = String(rawKey || "").trim();
-  if (!k) return { ok: false, error: "missing_key" };
-
-  const info = KEY_MAP[k];
-  if (!info) return { ok: false, error: "invalid_key" };
-
-  // смотрим лимит: max | limit | credits
-  const max = Number(info.max || info.limit || info.credits || 0) || 0;
-  const used = Number(info.used || 0);
-
-  // max = 0 → безлимитный ключ
-  if (max > 0 && used + amount > max) {
-    return {
-      ok: false,
-      error: "no_credits",
-      remaining: Math.max(0, max - used)
-    };
-  }
-
-  info.used = used + amount;
-  KEY_MAP[k] = info;
-  saveKeys();
-
-  const remaining = max > 0 ? max - info.used : null;
-  return { ok: true, remaining };
-}
-
 /* ====================== PAYWALL (keys.json) ====================== */
 
 const KEYS_DB = path.join(UPLOAD_DIR, "keys.json");
@@ -2004,6 +1938,7 @@ https://hi-ai.ai #ai #automation #creativity`.slice(0, maxChars);
 
 const PORT = process.env.PORT || 10000;
 app.listen(PORT, () => console.log(`HI-AI backend on :${PORT}`));
+
 
 
 
