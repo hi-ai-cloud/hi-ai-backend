@@ -118,28 +118,49 @@ function makeDataUrlSafe(dataUrl) {
 
 /* ====================== PAYWALL ====================== */
 function guardPaid(req, res, next) {
-  // если PAYWALL выключен — пускаем всех
-  if (String(process.env.PAYWALL_ENABLED) !== "true") return next();
+  // 1) НОРМАЛЬНАЯ проверка включённости
+  const paywallOn = String(process.env.PAYWALL_ENABLED || "")
+    .trim()
+    .toLowerCase() === "true";
 
-  // body у нас уже распаршен (express.json), но читаем аккуратно
+  if (!paywallOn) {
+    console.log("[PAYWALL] OFF → пропускаем всех");
+    return next();
+  }
+
   const body = readBody(req.body);
 
   const k =
-    req.header("X-API-Key") ||   // старый вариант (если где-то ещё живёт)
+    req.header("X-API-Key") ||   // старый вариант (если где-то живёт)
     req.query.key ||             // ?key=...
     body.api_key ||              // если кто-то шлёт api_key
-    body.pro_key ||              // ← наш фронт (Reels/Video Studio)
-    body.key;                    // запасной вариант
+    body.pro_key ||              // наш фронт (Reels / Video Studio)
+    body.key;                    // запасной
 
-  // Для дебага (можно потом удалить)
-  console.log("[PAYWALL] enabled =", process.env.PAYWALL_ENABLED,
-              "| got key =", k ? "(present)" : "(none)");
+  const expected = process.env.PAYWALL_KEY || "";
 
-  if (k && k === process.env.PAYWALL_KEY) {
-    return next(); // ключ правильный → пропускаем
+  console.log(
+    "[PAYWALL] ON | sent key =",
+    k || "(none)",
+    "| expected =",
+    expected ? "(set, length " + expected.length + ")" : "(NOT SET!)"
+  );
+
+  // если PAYWALL_KEY не задан вообще — лучше сразу рубить, чтобы не было "всё пускает"
+  if (!expected) {
+    return res.status(500).json({
+      ok: false,
+      error: "paywall_misconfigured",
+      message: "PAYWALL is enabled but PAYWALL_KEY is not set on server.",
+    });
   }
 
-  // ключа нет или он неправильный → рубим
+  if (k && k === expected) {
+    console.log("[PAYWALL] access GRANTED");
+    return next();
+  }
+
+  console.log("[PAYWALL] access DENIED");
   return res.status(402).json({
     ok: false,
     error: "payment_required",
@@ -1145,6 +1166,7 @@ Return JSON:
 /* ====================== START ====================== */
 const PORT = process.env.PORT || 10000;
 app.listen(PORT, () => console.log(`HI-AI backend on :${PORT}`));
+
 
 
 
