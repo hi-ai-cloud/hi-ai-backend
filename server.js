@@ -235,53 +235,56 @@ app.post("/api/trim25", upload.single("file"), async (req, res) => {
 app.post("/api/zoom2s", upload.single("file"), async (req, res) => {
   try {
     if (!req.file) return res.status(400).json({ ok:false, error:"no_file" });
-    const duration = Math.min(Math.max(parseFloat(req.body?.duration || "2.5"), 1.0), 5.0);
-    const fps = Math.min(Math.max(parseInt(req.body?.fps || "30",10), 15), 60);
-    const factor = Math.min(Math.max(parseFloat(req.body?.factor || "1.3"), 1.0), 2.0);
-    const frames = Math.round(duration * fps);
-    const step = (factor - 1.0) / frames;
 
-    const inName = `zin_${Date.now()}.mp4`;
+    const duration = Math.min(Math.max(parseFloat(req.body?.duration || "2.5"), 1.0), 5.0);
+    const fps      = Math.min(Math.max(parseInt(req.body?.fps || "30",10), 15), 60);
+    const factor   = Math.min(Math.max(parseFloat(req.body?.factor || "1.3"), 1.0), 2.0);
+
+    const frames = Math.round(duration * fps);
+    const step   = (factor - 1.0) / frames;
+
+    const inName  = `zin_${Date.now()}.mp4`;
     const outName = `zout_${Date.now()}.mp4`;
-    const inPath = path.join(UPLOAD_DIR, inName);
+    const inPath  = path.join(UPLOAD_DIR, inName);
     const outPath = path.join(UPLOAD_DIR, outName);
     fs.writeFileSync(inPath, req.file.buffer);
 
-    // zoompan: s=iw:ih (исправлено), fps фиксируем, длина = duration
+    // ГЛАВНОЕ: у zoompan БОЛЬШЕ НЕТ fps=...
     const filter = [
-  `fps=${fps}`,
-  `scale=iw:ih`, // сохраняем исходное разрешение от Replicate
-  `zoompan=z='min(1.0+on*${step.toFixed(6)},${factor})':d=1:s=iw:ih:fps=${fps}`
-].join(",");
+      `fps=${fps}`,
+      `scale=iw:ih`,
+      `zoompan=z='min(1.0+on*${step.toFixed(6)},${factor})':d=1:s=iw:ih`
+    ].join(",");
 
-await new Promise((resolve, reject) => {
-  ffmpeg(inPath)
-    .videoFilters(filter)
-    .outputOptions([
-      `-t ${duration}`,
-      "-movflags +faststart",
-      "-pix_fmt yuv420p",
-      "-c:v libx264",
-      "-profile:v high",
-      "-level 4.1",
-      "-preset veryfast",
-      "-crf 18",       // лучше качество
-      "-maxrate 12M",
-      "-bufsize 24M",
-      "-an"
-    ])
-    .on("end", resolve)
-    .on("error", reject)
-    .save(outPath);
-});
+    await new Promise((resolve, reject) => {
+      ffmpeg(inPath)
+        .videoFilters(filter)
+        .outputOptions([
+          `-t ${duration}`,
+          "-movflags +faststart",
+          "-pix_fmt yuv420p",
+          "-c:v libx264",
+          "-profile:v high",
+          "-level 4.1",
+          "-preset veryfast",
+          "-crf 18",
+          "-maxrate 12M",
+          "-bufsize 24M",
+          "-an"
+        ])
+        .on("end", resolve)
+        .on("error", reject)
+        .save(outPath);
+    });
 
-
-    fs.unlink(inPath, ()=>{});
+    fs.unlink(inPath, () => {});
     return res.json({ ok:true, url: absUrl(req, `/uploads/${outName}`) });
   } catch (e) {
-    return res.status(500).json({ ok:false, error:String(e.message||e) });
+    console.error("ZOOM2S ERROR", e);
+    return res.status(500).json({ ok:false, error:String(e.message || e) });
   }
 });
+
 
 /* ====================== WATERMARK ====================== */
 app.post("/api/watermark-video", upload.single("file"), async (req, res) => {
@@ -834,12 +837,14 @@ app.post("/api/video-studio", async (req, res) => {
                : rawMode === "video" ? "video"
                : (rawMode === "image2video" ? "image2video" : "image2video");
 
-    // секунды от фронта (2 или 5)
-    const rawSec = Number(body.video_seconds ?? body.duration_seconds ?? 5);
-    const secSafe = (!Number.isFinite(rawSec) || rawSec <= 0)
-      ? 5
-      : Math.min(10, Math.max(1, Math.round(rawSec))); // 1–10, целое
+   // что запросил фронт: 2 или 5
+const requestedSec = Number(body.video_seconds ?? body.duration_seconds ?? 5);
 
+// WAN реально умеет только 5 или 10
+let wanDuration = 5;
+if (Number.isFinite(requestedSec) && requestedSec >= 8) {
+  wanDuration = 10; // запас на будущее, если сделаешь 10s
+}
     let video_url = null;
 
     /* ================= IMAGE → VIDEO (WAN 2.5) ================= */
@@ -873,7 +878,7 @@ app.post("/api/video-studio", async (req, res) => {
         prompt: finalPrompt,
         negative_prompt: "text, watermark, logo, subtitles, letters",
         resolution: "720p",
-        duration: secSafe,           // ← 2 или 5, целое
+        duration: wanDuration,
         enable_prompt_expansion: true
       };
 
@@ -1115,6 +1120,7 @@ Return JSON:
 /* ====================== START ====================== */
 const PORT = process.env.PORT || 10000;
 app.listen(PORT, () => console.log(`HI-AI backend on :${PORT}`));
+
 
 
 
