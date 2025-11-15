@@ -118,28 +118,35 @@ function makeDataUrlSafe(dataUrl) {
 
 /* ====================== PAYWALL ====================== */
 function guardPaid(req, res, next) {
+  // если PAYWALL выключен — пускаем всех
   if (String(process.env.PAYWALL_ENABLED) !== "true") return next();
 
-  // аккуратно читаем body (он уже распарсен express.json)
+  // body у нас уже распаршен (express.json), но читаем аккуратно
   const body = readBody(req.body);
 
   const k =
-    req.header("X-API-Key") ||   // старый вариант, если где-то ещё живёт
+    req.header("X-API-Key") ||   // старый вариант (если где-то ещё живёт)
     req.query.key ||             // ?key=...
     body.api_key ||              // если кто-то шлёт api_key
-    body.pro_key ||              // ← НОВОЕ: наш фронт (Reels Maker)
+    body.pro_key ||              // ← наш фронт (Reels/Video Studio)
     body.key;                    // запасной вариант
 
+  // Для дебага (можно потом удалить)
+  console.log("[PAYWALL] enabled =", process.env.PAYWALL_ENABLED,
+              "| got key =", k ? "(present)" : "(none)");
+
   if (k && k === process.env.PAYWALL_KEY) {
-    return next();
+    return next(); // ключ правильный → пропускаем
   }
 
+  // ключа нет или он неправильный → рубим
   return res.status(402).json({
     ok: false,
     error: "payment_required",
     message: "Generation is available for paid users."
   });
 }
+
 
 /* ====================== HEALTH ====================== */
 app.get("/api/ping", (_req,res)=>{ // фронт ждёт именно этот путь
@@ -1138,6 +1145,7 @@ Return JSON:
 /* ====================== START ====================== */
 const PORT = process.env.PORT || 10000;
 app.listen(PORT, () => console.log(`HI-AI backend on :${PORT}`));
+
 
 
 
