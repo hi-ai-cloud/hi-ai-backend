@@ -574,47 +574,6 @@ const saveShortDb = () => {
   } catch {}
 };
 
-/* ====================== KEYS (PAYWALL TOKENS) ====================== */
-
-const KEYS_DB = path.join(UPLOAD_DIR, "keys.json");
-let KEYS = {};
-
-try {
-  KEYS = JSON.parse(fs.readFileSync(KEYS_DB, "utf8"));
-} catch {
-  KEYS = {};
-  console.warn("[KEYS] keys.json not found or invalid, using empty map");
-}
-
-function saveKeys() {
-  try {
-    fs.writeFileSync(KEYS_DB, JSON.stringify(KEYS, null, 2));
-  } catch (e) {
-    console.error("[KEYS] saveKeys failed:", e);
-  }
-}
-
-// helper: привести запись к нормальному виду (max / credits / used)
-function getKeyRecord(rawKey) {
-  const key = String(rawKey || "").trim();
-  if (!key) return null;
-
-  const rec = KEYS[key];
-  if (!rec) return null;
-
-  const limit =
-    typeof rec.max === "number"
-      ? rec.max
-      : typeof rec.credits === "number"
-      ? rec.credits
-      : 0; // 0 = без лимита
-
-  const used = typeof rec.used === "number" ? rec.used : 0;
-
-  return { key, limit, used, raw: rec };
-}
-
-
 const makeSlug = (n = 6) => {
   const a =
     "abcdefghijklmnopqrstuvwxyzABCDEFGHIJKLMNOPQRSTUVWXYZ0123456789";
@@ -1971,5 +1930,6 @@ https://hi-ai.ai #ai #automation #creativity`.slice(0, maxChars);
 
 const PORT = process.env.PORT || 10000;
 app.listen(PORT, () => console.log(`HI-AI backend on :${PORT}`));
+
 
 
