@@ -118,43 +118,36 @@ function makeDataUrlSafe(dataUrl) {
 
 /* ====================== PAYWALL ====================== */
 function guardPaid(req, res, next) {
-  // 1) НОРМАЛЬНАЯ проверка включённости
-  const paywallOn = String(process.env.PAYWALL_ENABLED || "")
-    .trim()
-    .toLowerCase() === "true";
-
-  if (!paywallOn) {
-    console.log("[PAYWALL] OFF → пропускаем всех");
+  // Включён ли paywall
+  const enabled = String(process.env.PAYWALL_ENABLED || "false").toLowerCase() === "true";
+  if (!enabled) {
+    // если PAYWALL выключен — пропускаем всех
     return next();
   }
 
-  const body = readBody(req.body);
+  // Ключ, который ты задал в env на Render
+  const expected = (process.env.PAYWALL_KEY || "").trim();
 
-  const k =
-    req.header("X-API-Key") ||   // старый вариант (если где-то живёт)
-    req.query.key ||             // ?key=...
-    body.api_key ||              // если кто-то шлёт api_key
-    body.pro_key ||              // наш фронт (Reels / Video Studio)
-    body.key;                    // запасной
-
-  const expected = process.env.PAYWALL_KEY || "";
-
-  console.log(
-    "[PAYWALL] ON | sent key =",
-    k || "(none)",
-    "| expected =",
-    expected ? "(set, length " + expected.length + ")" : "(NOT SET!)"
-  );
-
-  // если PAYWALL_KEY не задан вообще — лучше сразу рубить, чтобы не было "всё пускает"
+  // Если ключ вообще не задан в env — на всякий случай никого НЕ режем
   if (!expected) {
-    return res.status(500).json({
-      ok: false,
-      error: "paywall_misconfigured",
-      message: "PAYWALL is enabled but PAYWALL_KEY is not set on server.",
-    });
+    console.warn("[PAYWALL] PAYWALL_ENABLED=true, но PAYWALL_KEY не задан → пропускаем всех");
+    return next();
   }
 
+  // body уже распаршен express.json
+  const body = readBody(req.body);
+
+  // Откуда берём ключ:
+  const k =
+    req.header("X-API-Key") ||   // старые клиенты (если есть)
+    req.query.key ||             // ?key=...
+    body.api_key ||              // если кто-то шлёт api_key
+    body.pro_key ||              // наши новые фронты (Reels / Video Studio)
+    body.key;                    // запасной вариант
+
+  console.log("[PAYWALL] enabled=TRUE | got =", k ? "(present)" : "(none)");
+
+  // Разрешаем ТОЛЬКО если ключ ровно совпал с PAYWALL_KEY
   if (k && k === expected) {
     console.log("[PAYWALL] access GRANTED");
     return next();
@@ -167,6 +160,7 @@ function guardPaid(req, res, next) {
     message: "Generation is available for paid users."
   });
 }
+
 
 
 /* ====================== HEALTH ====================== */
@@ -1166,6 +1160,7 @@ Return JSON:
 /* ====================== START ====================== */
 const PORT = process.env.PORT || 10000;
 app.listen(PORT, () => console.log(`HI-AI backend on :${PORT}`));
+
 
 
 
