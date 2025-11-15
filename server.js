@@ -831,61 +831,61 @@ app.post("/api/video-studio", async (req, res) => {
   try {
     const body = readBody(req.body);
 
-    // FRONT: mode "i2v" / "image2video" / "video"
+    // FRONT: mode = "i2v" (image → video) или "video" (если когда-нибудь подключим)
     const rawMode = String(body.mode || "").toLowerCase();
-    const mode = rawMode === "i2v" ? "image2video"
-               : rawMode === "video" ? "video"
-               : (rawMode === "image2video" ? "image2video" : "image2video");
+    const mode =
+      rawMode === "i2v"   ? "image2video" :
+      rawMode === "video" ? "video" :
+                            "image2video";
 
-   // что запросил фронт: 2 или 5
-const requestedSec = Number(body.video_seconds ?? body.duration_seconds ?? 5);
+    // ⏱ сколько просит фронт (2 или 5), а WAN 2.5 принимает ТОЛЬКО 5 или 10
+    const requested = Number(body.video_seconds ?? body.duration_seconds ?? 5);
+    const secSafe   = requested <= 5 ? 5 : 10; // 2 → 5, 5 → 5, 8/10 → 10
 
-// WAN реально умеет только 5 или 10
-let wanDuration = 5;
-if (Number.isFinite(requestedSec) && requestedSec >= 8) {
-  wanDuration = 10; // запас на будущее, если сделаешь 10s
-}
     let video_url = null;
 
     /* ================= IMAGE → VIDEO (WAN 2.5) ================= */
     if (mode === "image2video") {
-
       const fallbackSlug = (process.env.REPLICATE_MODEL_SLUG_I2V_HD || "").trim();
       if (!fallbackSlug) {
         return res.json({ ok:false, error:"No I2V model configured." });
       }
 
+      // Берём картинку только из этих полей
       let incomingImage =
         body.image_data_url ||
-        body.image_url ||
-        body.image ||
+        body.image_url      ||
+        body.image          ||
         "";
 
       if (!incomingImage) {
         return res.json({ ok:false, error:"Missing image_data_url" });
       }
 
+      // Чиним data:URL
       if (incomingImage.startsWith("data:")) {
         const fixed = makeDataUrlSafe(incomingImage);
         if (!fixed) return res.json({ ok:false, error:"Bad data URL" });
         incomingImage = fixed;
       }
 
-      const finalPrompt = (body.prompt || "cinematic lighting").toString();
+      // Мини-промпт с фронта (miniPrompt), fallback — idea или дефолт
+      const finalPrompt =
+        (body.prompt || body.idea || "").toString().trim() ||
+        "cinematic lighting, no text, no watermark, no subtitles";
 
       const inputWan = {
         image: incomingImage,
         prompt: finalPrompt,
         negative_prompt: "text, watermark, logo, subtitles, letters",
         resolution: "720p",
-        duration: wanDuration,
+        duration: secSafe,          // ⬅ integer: 5 или 10 — больше не будет 422
         enable_prompt_expansion: true
       };
 
       try {
-        // ВАЖНО: без лишнего { input: ... }
+        // ВАЖНО: без { input: ... }, просто inputWan
         const job = await replicateCreateBySlug(fallbackSlug, inputWan);
-
         const done = await pollPredictionByUrl(job?.urls?.get, {
           tries: 240,
           delayMs: 1500
@@ -896,30 +896,35 @@ if (Number.isFinite(requestedSec) && requestedSec >= 8) {
         if (!got) throw new Error("No output from WAN 2.5");
 
         video_url = got;
-
       } catch (e) {
         console.error("WAN 2.5 ERROR:", e?.response?.data || e);
         return res.json({ ok:false, error:`WAN 2.5 ERROR: ${e.message || e}` });
       }
     }
 
-    /* ================= VIDEO → TRIM/ZOOM ================= */
+    /* ================= VIDEO → TRIM/ZOOM (резерв) ================= */
     if (mode === "video") {
-      // ЭТА ВЕТКА сейчас у тебя не используется фронтом (идёт напрямую на /api/zoom2s),
-      // но оставляем как резерв.
+      // Сейчас фронт сюда не ходит, всё zoom/trim через /api/zoom2s и /api/trim25
       return res.json({ ok:false, error:"Video mode not wired from frontend" });
     }
 
+    // ================ RETURN ==================
     if (!video_url) {
       return res.json({ ok:false, error:"Nothing generated" });
     }
 
-    return res.json({ ok:true, video_url, seconds: secSafe });
+    return res.json({
+      ok: true,
+      video_url,
+      seconds: secSafe      // чтобы фронт знал 5 или 10 мы отдали
+    });
+
   } catch (e) {
     console.error("VIDEO_STUDIO ERROR", e);
     return res.status(500).json({ ok:false, error:String(e.message || e) });
   }
 });
+
 
 
 
@@ -1120,6 +1125,7 @@ Return JSON:
 /* ====================== START ====================== */
 const PORT = process.env.PORT || 10000;
 app.listen(PORT, () => console.log(`HI-AI backend on :${PORT}`));
+
 
 
 
