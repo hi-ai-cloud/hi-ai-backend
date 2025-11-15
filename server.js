@@ -226,71 +226,63 @@ function consumeCredits(rawKey, amount = 1) {
   return { ok: true, remaining };
 }
 
-/* ====================== PAYWALL (per-key tokens) ====================== */
+/* ====================== PAYWALL (BY KEYS.JSON) ====================== */
+
 function guardPaid(req, res, next) {
-  // если paywall выключен — пускаем всех
+  // если PAYWALL выключен — пускаем всех
   if (String(process.env.PAYWALL_ENABLED) !== "true") return next();
 
   const body = readBody(req.body);
 
   const k =
-    req.header("X-API-Key") ||   // фронт уже шлёт сюда
-    req.query.key ||             // ?key=...
-    body.api_key ||              // если кто-то шлёт api_key
-    body.pro_key ||              // ← наш фронт может шлёпать pro_key
-    body.key;                    // запасной вариант
+    req.header("X-API-Key") ||
+    req.query.key ||
+    body.api_key ||
+    body.pro_key ||
+    body.key;
 
-  // мастер-ключ (PAYWALL_KEY) — безлимитный, не тратит токены
-  if (k && process.env.PAYWALL_KEY && k === process.env.PAYWALL_KEY) {
-    req.hiaiKey = k;
-    req.hiaiRemaining = null; // бесконечно
-    return next();
-  }
+  const info = getKeyRecord(k);
+  const isKeyCheck =
+    req.path === "/api/key-check" ||
+    req.originalUrl?.includes("/api/key-check");
 
-  if (!k) {
-    return res.status(402).json({
-      ok: false,
-      error: "payment_required",
-      message: "Missing API key."
-    });
-  }
-
-  const info = getKeyInfo(k);
+  // нет такого ключа вообще
   if (!info) {
     return res.status(402).json({
       ok: false,
-      error: "invalid_key",
-      message: "Unknown or invalid key."
+      error: "payment_required",
+      message: "Invalid or missing key"
     });
   }
 
-  // /api/key-check — только проверка, НЕ тратим токен
-  const onlyCheck = req.path === "/api/key-check";
-
-  if (!onlyCheck) {
-    const spent = consumeCredits(k, 1);
-    if (!spent.ok) {
-      const code = spent.error === "no_credits" ? 402 : 400;
-      return res.status(code).json({
-        ok: false,
-        error: spent.error,
-        message:
-          spent.error === "no_credits"
-            ? "Key has no remaining credits."
-            : "Key error.",
-        remaining: spent.remaining ?? 0
-      });
-    }
-    req.hiaiRemaining = spent.remaining;
-  } else {
-    const max = Number(info.max || info.limit || info.credits || 0) || 0;
-    const used = Number(info.used || 0);
-    req.hiaiRemaining = max > 0 ? Math.max(0, max - used) : null;
+  // лимит есть и он исчерпан
+  if (info.limit > 0 && info.used >= info.limit) {
+    return res.status(402).json({
+      ok: false,
+      error: "payment_required",
+      message: "No credits left for this key"
+    });
   }
 
-  req.hiaiKey = k;
+  // на /api/key-check только проверяем, НИЧЕГО не списываем
+  if (!isKeyCheck && info.limit > 0) {
+    info.used += 1;
+    // обновляем в памяти + сохраняем на диск
+    if (!KEYS[info.key]) KEYS[info.key] = {};
+    KEYS[info.key].used = info.used;
+    if (typeof KEYS[info.key].max !== "number" && typeof KEYS[info.key].credits !== "number") {
+      KEYS[info.key].max = info.limit;
+    }
+    saveKeys();
+  }
+
+  // прокидываем в req, если хочется где-то ещё использовать
+  req.hiaiKey = info.key;
+  req.hiaiKeyInfo = info;
+
   return next();
 }
+
 
 app.get("/api/key-check", guardPaid, (req, res) => res.json({ ok: true }));
 
@@ -581,6 +573,47 @@ const saveShortDb = () => {
     fs.writeFileSync(SHORT_DB, JSON.stringify(SHORT_MAP, null, 0));
   } catch {}
 };
+
+/* ====================== KEYS (PAYWALL TOKENS) ====================== */
+
+const KEYS_DB = path.join(UPLOAD_DIR, "keys.json");
+let KEYS = {};
+
+try {
+  KEYS = JSON.parse(fs.readFileSync(KEYS_DB, "utf8"));
+} catch {
+  KEYS = {};
+  console.warn("[KEYS] keys.json not found or invalid, using empty map");
+}
+
+function saveKeys() {
+  try {
+    fs.writeFileSync(KEYS_DB, JSON.stringify(KEYS, null, 2));
+  } catch (e) {
+    console.error("[KEYS] saveKeys failed:", e);
+  }
+}
+
+// helper: привести запись к нормальному виду (max / credits / used)
+function getKeyRecord(rawKey) {
+  const key = String(rawKey || "").trim();
+  if (!key) return null;
+
+  const rec = KEYS[key];
+  if (!rec) return null;
+
+  const limit =
+    typeof rec.max === "number"
+      ? rec.max
+      : typeof rec.credits === "number"
+      ? rec.credits
+      : 0; // 0 = без лимита
+
+  const used = typeof rec.used === "number" ? rec.used : 0;
+
+  return { key, limit, used, raw: rec };
+}
+
 
 const makeSlug = (n = 6) => {
   const a =
@@ -1938,4 +1971,5 @@ https://hi-ai.ai #ai #automation #creativity`.slice(0, maxChars);
 
 const PORT = process.env.PORT || 10000;
 app.listen(PORT, () => console.log(`HI-AI backend on :${PORT}`));
+
 
