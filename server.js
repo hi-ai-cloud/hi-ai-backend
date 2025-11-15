@@ -226,69 +226,143 @@ function consumeCredits(rawKey, amount = 1) {
   return { ok: true, remaining };
 }
 
-/* ====================== PAYWALL (BY KEYS.JSON) ====================== */
+/* ====================== PAYWALL (keys.json) ====================== */
 
-function guardPaid(req, res, next) {
-  // если PAYWALL выключен — пускаем всех
-  if (String(process.env.PAYWALL_ENABLED) !== "true") return next();
+const KEYS_DB = path.join(UPLOAD_DIR, "keys.json");
+let KEYS = {};
 
+// Пробуем прочитать keys.json
+try {
+  KEYS = JSON.parse(fs.readFileSync(KEYS_DB, "utf8"));
+  console.log("[KEYS] Loaded keys:", Object.keys(KEYS));
+} catch (e) {
+  KEYS = {};
+  console.warn("[KEYS] keys.json not found or invalid, using empty map:", e.message || e);
+}
+
+// Сохранить keys.json
+function saveKeys() {
+  try {
+    fs.writeFileSync(KEYS_DB, JSON.stringify(KEYS, null, 2));
+    console.log("[KEYS] keys.json saved");
+  } catch (e) {
+    console.error("[KEYS] saveKeys failed:", e);
+  }
+}
+
+// Нормализуем запись о ключе
+function getKeyRecord(rawKey) {
+  const key = String(rawKey || "").trim();
+  if (!key) return null;
+
+  const rec = KEYS[key];
+  if (!rec) return null;
+
+  const limit =
+    typeof rec.max === "number"
+      ? rec.max
+      : typeof rec.credits === "number"
+      ? rec.credits
+      : 0; // 0 = без лимита
+
+  const used = typeof rec.used === "number" ? rec.used : 0;
+
+  return { key, limit, used, raw: rec };
+}
+
+// Вытаскиваем ключ из запроса (header / query / body)
+function extractKey(req) {
   const body = readBody(req.body);
-
-  const k =
+  return (
     req.header("X-API-Key") ||
     req.query.key ||
     body.api_key ||
-    body.pro_key ||
-    body.key;
-
-  const info = getKeyRecord(k);
-  const isKeyCheck =
-    req.path === "/api/key-check" ||
-    req.originalUrl?.includes("/api/key-check");
-
-  // нет такого ключа вообще
-  if (!info) {
-    return res.status(402).json({
-      ok: false,
-      error: "payment_required",
-      message: "Invalid or missing key"
-    });
-  }
-
-  // лимит есть и он исчерпан
-  if (info.limit > 0 && info.used >= info.limit) {
-    return res.status(402).json({
-      ok: false,
-      error: "payment_required",
-      message: "No credits left for this key"
-    });
-  }
-
-  // на /api/key-check только проверяем, НИЧЕГО не списываем
-  if (!isKeyCheck && info.limit > 0) {
-    info.used += 1;
-    // обновляем в памяти + сохраняем на диск
-    if (!KEYS[info.key]) KEYS[info.key] = {};
-    KEYS[info.key].used = info.used;
-    if (typeof KEYS[info.key].max !== "number" && typeof KEYS[info.key].credits !== "number") {
-      KEYS[info.key].max = info.limit;
-    }
-    saveKeys();
-  }
-
-  // прокидываем в req, если хочется где-то ещё использовать
-  req.hiaiKey = info.key;
-  req.hiaiKeyInfo = info;
-
-  return next();
+    body.pro_key || // фронт Reels / Video Studio
+    body.key ||
+    ""
+  ).trim();
 }
 
+// /api/key-check — просто проверить валидность и лимит, БЕЗ списания
+app.get("/api/key-check", (req, res) => {
+  try {
+    const key = extractKey(req);
+    const rec = getKeyRecord(key);
 
-app.get("/api/key-check", guardPaid, (req, res) => res.json({ ok: true }));
+    if (!key || !rec) {
+      return res.status(402).json({
+        ok: false,
+        error: "invalid or missing key",
+      });
+    }
 
-app.use("/api/video-studio", guardPaid);
-app.use("/api/image-studio", guardPaid);
-app.use("/api/video-reels", guardPaid);
+    const remaining =
+      rec.limit > 0 ? Math.max(0, rec.limit - rec.used) : null;
+
+    return res.json({
+      ok: true,
+      key: rec.key,
+      limit: rec.limit,     // 0 = безлимит
+      used: rec.used,
+      remaining,            // null = безлимит
+      note: rec.raw.note || null,
+    });
+  } catch (e) {
+    console.error("[KEYCHECK] error:", e);
+    return res.status(500).json({
+      ok: false,
+      error: String(e.message || e),
+    });
+  }
+});
+
+// Middleware: каждый платный вызов проходит через него
+function guardPaid(req, res, next) {
+  // Если PAYWALL выключен — пускаем всех
+  if (String(process.env.PAYWALL_ENABLED) !== "true") {
+    return next();
+  }
+
+  try {
+    const key = extractKey(req);
+    const rec = getKeyRecord(key);
+
+    if (!key || !rec) {
+      return res.status(402).json({
+        ok: false,
+        error: "invalid or missing key",
+      });
+    }
+
+    // Проверяем лимит
+    if (rec.limit > 0 && rec.used >= rec.limit) {
+      return res.status(402).json({
+        ok: false,
+        error: "key limit exceeded",
+      });
+    }
+
+    // Списываем 1 использование
+    rec.raw.used = (rec.raw.used || 0) + 1;
+    KEYS[rec.key] = rec.raw;
+    saveKeys();
+
+    // Можно повесить инфу на req, если пригодится
+    req.payKey = {
+      key: rec.key,
+      limit: rec.limit,
+      used: rec.raw.used,
+    };
+
+    next();
+  } catch (e) {
+    console.error("[PAYWALL] guardPaid error:", e);
+    return res.status(500).json({
+      ok: false,
+      error: String(e.message || e),
+    });
+  }
+}
 
 /* ====================== HEALTH ====================== */
 
@@ -1930,6 +2004,7 @@ https://hi-ai.ai #ai #automation #creativity`.slice(0, maxChars);
 
 const PORT = process.env.PORT || 10000;
 app.listen(PORT, () => console.log(`HI-AI backend on :${PORT}`));
+
 
 
 
