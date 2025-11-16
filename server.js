@@ -311,6 +311,31 @@ function guardPaid(req, res, next) {
   }
 }
 
+// ====================== ADMIN AUTH (secret) ======================
+
+function ensureAdmin(req, res) {
+  // откуда берём секрет
+  const sec =
+    (req.query && req.query.secret) ||
+    req.header("X-Admin-Secret") ||
+    (req.body && req.body.secret) ||
+    "";
+
+  // чем проверяем — можно использовать любую из этих переменных
+  const expected =
+    process.env.KEYS_ADMIN_SECRET ||
+    process.env.ADMIN_SECRET ||
+    process.env.ADMIN_SECRET_PASS ||
+    "";
+
+  if (!expected || sec !== expected) {
+    res.status(403).json({ ok: false, error: "forbidden" });
+    return false;
+  }
+  return true;
+}
+
+
 /* ====================== ADMIN: KEYS PANEL ====================== */
 
 const ADMIN_SECRET = process.env.ADMIN_SECRET || "DEV-ADMIN-PASS";
@@ -2526,6 +2551,7 @@ https://hi-ai.ai #ai #automation #creativity`.slice(0, maxChars);
 
 const PORT = process.env.PORT || 10000;
 app.listen(PORT, () => console.log(`HI-AI backend on :${PORT}`));
+
 
 
 
