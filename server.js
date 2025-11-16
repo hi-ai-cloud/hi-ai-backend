@@ -426,6 +426,28 @@ app.post("/api/admin/new-key", guardAdmin, async (req, res) => {
   }
 });
 
+// Сбросить счётчик used для ключа
+app.post("/api/admin/keys/reset", (req, res) => {
+  if (!ensureAdmin(req, res)) return;
+  const body = readBody(req.body);
+  const key = String(body.key || "").trim();
+
+  if (!key || !KEYS[key]) {
+    return res.status(404).json({ ok: false, error: "Key not found" });
+  }
+
+  KEYS[key].used = 0;
+  saveKeys();
+
+  const rec = getKeyRecord(key);
+  return res.json({
+    ok: true,
+    key: rec.key,
+    limit: rec.limit,
+    used: rec.used,
+  });
+});
+
 // GET /admin — простая HTML-панель
 app.get("/admin", (req, res) => {
   res.type("html").send(`<!DOCTYPE html>
@@ -502,6 +524,22 @@ app.get("/admin", (req, res) => {
   .row{display:flex;gap:8px;flex-wrap:wrap;align-items:center;}
   .muted{color:#666;font-size:12px;}
   .error{color:#c00;font-size:13px;margin-top:4px;}
+
+  /* маленькие кнопки в таблице */
+  .btn-sm{
+    padding:4px 8px;
+    border-radius:6px;
+    border:1px solid #ddd;
+    background:#fff;
+    color:#333;
+    font-size:12px;
+    cursor:pointer;
+  }
+  .btn-sm.danger{
+    border-color:#f5b5b5;
+    background:#ffecec;
+    color:#b00;
+  }
 </style>
 </head>
 <body>
@@ -533,8 +571,21 @@ app.get("/admin", (req, res) => {
 
   <div class="card">
     <h2 style="margin-top:0;font-size:18px;">All keys</h2>
+
+    <!-- кнопки экспорта -->
+    <div style="display:flex;justify-content:flex-end;gap:8px;margin-bottom:6px;">
+      <button id="btnExportJson" class="btn-sm" style="border-radius:999px;">
+        Export JSON
+      </button>
+      <button id="btnExportCsv" class="btn-sm" style="border-radius:999px;">
+        Export CSV
+      </button>
+    </div>
+
     <div id="errorBox" class="error"></div>
     <div class="muted" id="summary"></div>
+    <div class="muted" id="billingSummary" style="margin-top:4px;"></div>
+
     <div style="overflow:auto;margin-top:8px;">
       <table id="keysTable">
         <thead>
@@ -545,6 +596,7 @@ app.get("/admin", (req, res) => {
             <th>Remaining</th>
             <th>Plan</th>
             <th>Note</th>
+            <th>Actions</th>
           </tr>
         </thead>
         <tbody></tbody>
@@ -559,6 +611,7 @@ app.get("/admin", (req, res) => {
 
   const tableBody = document.querySelector('#keysTable tbody');
   const summaryEl = document.getElementById('summary');
+  const billingSummaryEl = document.getElementById('billingSummary');
   const errorBox = document.getElementById('errorBox');
   const limitInput = document.getElementById('limitInput');
   const prefixInput = document.getElementById('prefixInput');
@@ -566,9 +619,13 @@ app.get("/admin", (req, res) => {
   const createBtn = document.getElementById('createBtn');
   const createStatus = document.getElementById('createStatus');
 
+  const btnExportJson = document.getElementById('btnExportJson');
+  const btnExportCsv  = document.getElementById('btnExportCsv');
+
   async function loadKeys(){
     errorBox.textContent = '';
     summaryEl.textContent = 'Loading…';
+    billingSummaryEl.textContent = '';
     tableBody.innerHTML = '';
     try{
       const res = await fetch('/api/admin/keys?secret=' + encodeURIComponent(secret));
@@ -578,11 +635,26 @@ app.get("/admin", (req, res) => {
       }
       const data = await res.json();
       if(!data.ok) throw new Error(data.error || 'Unknown error');
-      renderKeys(data.keys || []);
-      summaryEl.textContent = 'Total keys: ' + (data.total || data.keys.length || 0);
+
+      const list = data.keys || [];
+      renderKeys(list);
+
+      const total = data.total || list.length || 0;
+      summaryEl.textContent = 'Total keys: ' + total;
+
+      // простой биллинг: считаем общее число генераций и примерную стоимость
+      const totalUsed = list.reduce((sum, k) => sum + (k.used || 0), 0);
+      const COST_PER_GEN = 0.03; // можешь потом поменять
+      const approx = (totalUsed * COST_PER_GEN).toFixed(2);
+      billingSummaryEl.textContent =
+        'Total generations: ' + totalUsed +
+        ' | Approx. AI cost (at $' + COST_PER_GEN.toFixed(2) +
+        ' / gen): $' + approx;
+
     }catch(e){
       errorBox.textContent = String(e.message || e);
       summaryEl.textContent = '';
+      billingSummaryEl.textContent = '';
     }
   }
 
@@ -629,6 +701,14 @@ app.get("/admin", (req, res) => {
       tdNote.textContent = item.note || '';
       tr.appendChild(tdNote);
 
+      // Actions: Reset + Delete
+      const tdActions = document.createElement('td');
+      tdActions.innerHTML = [
+        '<button class="btn-sm" data-act="reset" data-key="' + item.key + '">Reset</button>',
+        '<button class="btn-sm danger" data-act="del" data-key="' + item.key + '">Delete</button>'
+      ].join(' ');
+      tr.appendChild(tdActions);
+
       tableBody.appendChild(tr);
     });
   }
@@ -661,6 +741,62 @@ app.get("/admin", (req, res) => {
     }
   });
 
+  // клики по кнопкам Reset / Delete
+  tableBody.addEventListener('click', async (e)=>{
+    const btn = e.target.closest('button[data-act]');
+    if (!btn) return;
+    const act = btn.dataset.act;
+    const key = btn.dataset.key;
+    if (!key) return;
+
+    if (act === 'reset') {
+      if (!confirm('Reset usage counter for key "' + key + '"?')) return;
+      try{
+        const r = await fetch('/api/admin/keys/reset?secret=' + encodeURIComponent(secret), {
+          method:'POST',
+          headers:{'content-type':'application/json'},
+          body: JSON.stringify({ key })
+        });
+        const data = await r.json().catch(()=> ({}));
+        if(!r.ok || !data.ok){
+          throw new Error(data.error || ('HTTP ' + r.status));
+        }
+        await loadKeys();
+      }catch(err){
+        alert('Reset failed: ' + String(err.message || err));
+      }
+    }
+
+    if (act === 'del') {
+      if (!confirm('Delete key "' + key + '" permanently?')) return;
+      try{
+        const r = await fetch('/api/admin/keys/delete?secret=' + encodeURIComponent(secret), {
+          method:'POST',
+          headers:{'content-type':'application/json'},
+          body: JSON.stringify({ key })
+        });
+        const data = await r.json().catch(()=> ({}));
+        if(!r.ok || !data.ok){
+          throw new Error(data.error || ('HTTP ' + r.status));
+        }
+        await loadKeys();
+      }catch(err){
+        alert('Delete failed: ' + String(err.message || err));
+      }
+    }
+  });
+
+  // экспорт JSON / CSV
+  btnExportJson.addEventListener('click', ()=>{
+    const link = '/api/admin/keys/export.json?secret=' + encodeURIComponent(secret);
+    window.open(link, '_blank');
+  });
+
+  btnExportCsv.addEventListener('click', ()=>{
+    const link = '/api/admin/keys/export.csv?secret=' + encodeURIComponent(secret);
+    window.open(link, '_blank');
+  });
+
   if (!secret) {
     errorBox.textContent = 'Add ?secret=YOUR_ADMIN_SECRET to URL.';
   } else {
@@ -671,6 +807,7 @@ app.get("/admin", (req, res) => {
 </body>
 </html>`);
 });
+
 
 /* ====================== HEALTH ====================== */
 
@@ -700,6 +837,83 @@ app.get("/env-check", (_req, res) => {
     PUBLIC_ORIGIN: process.env.PUBLIC_ORIGIN || null,
     PAYWALL_ENABLED: !!process.env.PAYWALL_ENABLED,
   });
+});
+
+// экспорт и операции с ключами — ТОЛЬКО для админ-панели
+app.post("/api/admin/keys/reset", (req, res) => {
+  if (!ensureAdmin(req, res)) return;
+  const body = readBody(req.body);
+  const key = String(body.key || "").trim();
+
+  if (!key || !KEYS[key]) {
+    return res.status(404).json({ ok: false, error: "Key not found" });
+  }
+
+  KEYS[key].used = 0;
+  saveKeys();
+
+  const rec = getKeyRecord(key);
+  return res.json({ ok: true, key: rec.key, limit: rec.limit, used: rec.used });
+});
+
+app.post("/api/admin/keys/delete", (req, res) => {
+  if (!ensureAdmin(req, res)) return;
+  const body = readBody(req.body);
+  const key = String(body.key || "").trim();
+
+  if (!key || !KEYS[key]) {
+    return res.status(404).json({ ok: false, error: "Key not found" });
+  }
+
+  delete KEYS[key];
+  saveKeys();
+
+  return res.json({ ok: true, deleted: key });
+});
+
+app.get("/api/admin/keys/export.json", (req, res) => {
+  if (!ensureAdmin(req, res)) return;
+  const all = Object.entries(KEYS).map(([key, raw]) => {
+    const rec = getKeyRecord(key);
+    const remaining =
+      rec.limit > 0 ? Math.max(0, rec.limit - rec.used) : null;
+    return {
+      key,
+      limit: rec.limit,
+      used: rec.used,
+      remaining,
+      plan: raw.plan || null,
+      note: raw.note || "",
+    };
+  });
+  res.setHeader("Content-Type", "application/json; charset=utf-8");
+  res.setHeader("Content-Disposition", 'attachment; filename="hiai_keys.json"');
+  res.json(all);
+});
+
+app.get("/api/admin/keys/export.csv", (req, res) => {
+  if (!ensureAdmin(req, res)) return;
+  const rows = [["Key", "Limit", "Used", "Remaining", "Plan", "Note"]];
+  for (const [key, raw] of Object.entries(KEYS)) {
+    const rec = getKeyRecord(key);
+    const remaining =
+      rec.limit > 0 ? Math.max(0, rec.limit - rec.used) : "";
+    rows.push([
+      key,
+      rec.limit === 0 ? "∞" : String(rec.limit),
+      String(rec.used),
+      remaining === "" ? "" : String(remaining),
+      raw.plan || "",
+      (raw.note || "").replace(/"/g, '""'),
+    ]);
+  }
+  const csv = rows
+    .map(r => r.map(c => '"' + String(c ?? "").replace(/"/g, '""') + '"').join(","))
+    .join("\\n");
+
+  res.setHeader("Content-Type", "text/csv; charset=utf-8");
+  res.setHeader("Content-Disposition", 'attachment; filename="hiai_keys.csv"');
+  res.send(csv);
 });
 
 /* ====================== UPLOAD (form-data) ====================== */
@@ -881,7 +1095,7 @@ app.post("/api/zoom2s", guardPaid, upload.single("file"), async (req, res) => {
 
 /* ====================== WATERMARK ====================== */
 
-app.post("/api/watermark-video", guardPaid, upload.single("file"), async (req, res) => {
+app.post("/api/watermark-video", upload.single("file"), async (req, res) => {
   // CORS
   res.setHeader("Access-Control-Allow-Origin", "*");
 
@@ -2312,6 +2526,7 @@ https://hi-ai.ai #ai #automation #creativity`.slice(0, maxChars);
 
 const PORT = process.env.PORT || 10000;
 app.listen(PORT, () => console.log(`HI-AI backend on :${PORT}`));
+
 
 
 
