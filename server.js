@@ -311,6 +311,366 @@ function guardPaid(req, res, next) {
   }
 }
 
+/* ====================== ADMIN: KEYS PANEL ====================== */
+
+const ADMIN_SECRET = process.env.ADMIN_SECRET || "DEV-ADMIN-PASS";
+
+// Простая проверка "я админ?"
+function guardAdmin(req, res, next) {
+  const secret =
+    (req.query.secret || req.header("X-Admin-Secret") || "").trim();
+
+  if (!ADMIN_SECRET || !secret || secret !== ADMIN_SECRET) {
+    return res.status(401).send("Unauthorized");
+  }
+  next();
+}
+
+// GET /api/admin/keys — вернуть все ключи + остаток
+app.get("/api/admin/keys", guardAdmin, (req, res) => {
+  try {
+    const list = Object.entries(KEYS).map(([key, rec]) => {
+      const limit =
+        typeof rec.max === "number"
+          ? rec.max
+          : typeof rec.credits === "number"
+          ? rec.credits
+          : 0;
+
+      const used = typeof rec.used === "number" ? rec.used : 0;
+      const remaining =
+        limit > 0 ? Math.max(0, limit - used) : null; // null = безлимит
+
+      return {
+        key,
+        limit,
+        used,
+        remaining,
+        note: rec.note || null,
+      };
+    });
+
+    res.json({
+      ok: true,
+      total: list.length,
+      keys: list,
+    });
+  } catch (e) {
+    console.error("[ADMIN/KEYS] error:", e);
+    res.status(500).json({ ok: false, error: String(e.message || e) });
+  }
+});
+
+// Утилита: рандомный хвост для ключа
+function randomChunk(len = 6) {
+  const alphabet = "ABCDEFGHJKLMNPQRSTUVWXYZ23456789";
+  let out = "";
+  for (let i = 0; i < len; i++) {
+    out += alphabet[Math.floor(Math.random() * alphabet.length)];
+  }
+  return out;
+}
+
+// POST /api/admin/new-key — создать новый ключ
+// body: { limit, note, prefix?, key? }
+app.post("/api/admin/new-key", guardAdmin, async (req, res) => {
+  try {
+    const body = readBody(req.body);
+
+    const rawLimit = body.limit;
+    const limitNum =
+      rawLimit === undefined || rawLimit === null || rawLimit === ""
+        ? 0
+        : Number(rawLimit);
+
+    const limit = Number.isFinite(limitNum) ? limitNum : 0;
+    const note = (body.note || "").toString();
+    const prefix =
+      (body.prefix || "").toString().trim() ||
+      (limit === 0 ? "VIP-UNLIM" : "PRO");
+    let key =
+      (body.key || "").toString().trim() ||
+      `${prefix}-${limit > 0 ? limit : "UNLIM"}-${randomChunk(6)}`;
+
+    if (KEYS[key]) {
+      return res.status(400).json({
+        ok: false,
+        error: "Key already exists",
+      });
+    }
+
+    KEYS[key] = {
+      max: limit,
+      used: 0,
+      note,
+    };
+
+    try {
+      fs.writeFileSync(KEYS_DB, JSON.stringify(KEYS, null, 2));
+    } catch (e) {
+      console.error("[ADMIN/NEW-KEY] write keys.json failed:", e);
+    }
+
+    return res.json({
+      ok: true,
+      key,
+      limit,
+      note,
+    });
+  } catch (e) {
+    console.error("[ADMIN/NEW-KEY] error:", e);
+    return res.status(500).json({
+      ok: false,
+      error: String(e.message || e),
+    });
+  }
+});
+
+// GET /admin — простая HTML-панель
+app.get("/admin", (req, res) => {
+  res.type("html").send(`<!DOCTYPE html>
+<html lang="en">
+<head>
+<meta charset="UTF-8" />
+<title>HI-AI — Keys Admin</title>
+<meta name="viewport" content="width=device-width, initial-scale=1" />
+<style>
+  body{
+    margin:0;
+    font-family:system-ui, -apple-system, BlinkMacSystemFont, "Segoe UI", sans-serif;
+    background:#f4f4f8;
+    color:#111;
+  }
+  .wrap{
+    max-width:960px;
+    margin:24px auto;
+    padding:0 16px 40px;
+  }
+  h1{margin:0 0 12px;font-size:24px;}
+  .card{
+    background:#fff;
+    border-radius:12px;
+    padding:16px;
+    margin-bottom:16px;
+    box-shadow:0 2px 8px rgba(0,0,0,.04);
+    border:1px solid #e3e3f0;
+  }
+  label{font-size:14px;display:block;margin-bottom:4px;}
+  input,textarea{
+    width:100%;
+    box-sizing:border-box;
+    padding:8px 10px;
+    border-radius:8px;
+    border:1px solid #ddd;
+    font:inherit;
+    margin-bottom:8px;
+  }
+  button{
+    appearance:none;
+    border:0;
+    padding:8px 14px;
+    border-radius:999px;
+    background:#E87D24;
+    color:#fff;
+    font-weight:600;
+    cursor:pointer;
+  }
+  button[disabled]{opacity:.5;cursor:not-allowed}
+  table{
+    width:100%;
+    border-collapse:collapse;
+    font-size:13px;
+  }
+  th,td{
+    border-bottom:1px solid #eee;
+    padding:6px 8px;
+    text-align:left;
+    white-space:nowrap;
+  }
+  th{background:#fafafe;font-weight:600;}
+  td.note{white-space:normal;max-width:260px;}
+  .tag{
+    display:inline-block;
+    padding:2px 8px;
+    border-radius:999px;
+    font-size:11px;
+    background:#eee;
+  }
+  .tag.pro{background:#ffe4ce;}
+  .tag.free{background:#e7f5ff;}
+  .tag.vip{background:#e6ffed;}
+  .row{display:flex;gap:8px;flex-wrap:wrap;align-items:center;}
+  .muted{color:#666;font-size:12px;}
+  .error{color:#c00;font-size:13px;margin-top:4px;}
+</style>
+</head>
+<body>
+<div class="wrap">
+  <h1>HI-AI — Keys Admin</h1>
+  <p class="muted">
+    Панель для просмотра и создания ключей. Передай ?secret=YOUR_ADMIN_SECRET в URL.<br/>
+    Пример: <code>?secret=SUPER-SECRET-PASS</code>
+  </p>
+
+  <div class="card">
+    <h2 style="margin-top:0;font-size:18px;">Create new key</h2>
+    <div class="row" style="margin-bottom:8px;">
+      <div style="flex:1 1 140px;min-width:140px;">
+        <label>Limit (0 = unlimited)</label>
+        <input id="limitInput" type="number" min="0" value="100" />
+      </div>
+      <div style="flex:1 1 140px;min-width:140px;">
+        <label>Prefix (optional)</label>
+        <input id="prefixInput" placeholder="PRO, FREE, VIP-UNLIM…" />
+      </div>
+    </div>
+    <label>Note (optional)</label>
+    <textarea id="noteInput" rows="2" placeholder="Who is this key for?"></textarea>
+
+    <button id="createBtn">Create key</button>
+    <span id="createStatus" class="muted" style="margin-left:8px;"></span>
+  </div>
+
+  <div class="card">
+    <h2 style="margin-top:0;font-size:18px;">All keys</h2>
+    <div id="errorBox" class="error"></div>
+    <div class="muted" id="summary"></div>
+    <div style="overflow:auto;margin-top:8px;">
+      <table id="keysTable">
+        <thead>
+          <tr>
+            <th>Key</th>
+            <th>Limit</th>
+            <th>Used</th>
+            <th>Remaining</th>
+            <th>Plan</th>
+            <th>Note</th>
+          </tr>
+        </thead>
+        <tbody></tbody>
+      </table>
+    </div>
+  </div>
+</div>
+<script>
+(function(){
+  const url = new URL(location.href);
+  const secret = url.searchParams.get('secret') || '';
+
+  const tableBody = document.querySelector('#keysTable tbody');
+  const summaryEl = document.getElementById('summary');
+  const errorBox = document.getElementById('errorBox');
+  const limitInput = document.getElementById('limitInput');
+  const prefixInput = document.getElementById('prefixInput');
+  const noteInput = document.getElementById('noteInput');
+  const createBtn = document.getElementById('createBtn');
+  const createStatus = document.getElementById('createStatus');
+
+  async function loadKeys(){
+    errorBox.textContent = '';
+    summaryEl.textContent = 'Loading…';
+    tableBody.innerHTML = '';
+    try{
+      const res = await fetch('/api/admin/keys?secret=' + encodeURIComponent(secret));
+      if(!res.ok){
+        const txt = await res.text();
+        throw new Error('HTTP ' + res.status + ' ' + res.statusText + ' :: ' + txt);
+      }
+      const data = await res.json();
+      if(!data.ok) throw new Error(data.error || 'Unknown error');
+      renderKeys(data.keys || []);
+      summaryEl.textContent = 'Total keys: ' + (data.total || data.keys.length || 0);
+    }catch(e){
+      errorBox.textContent = String(e.message || e);
+      summaryEl.textContent = '';
+    }
+  }
+
+  function detectPlanTag(k, limit){
+    const key = String(k || '');
+    if (key.startsWith('FREE') || key.startsWith('DEMO')) {
+      return '<span class="tag free">FREE</span>';
+    }
+    if (limit === 0) {
+      return '<span class="tag vip">UNLIM</span>';
+    }
+    return '<span class="tag pro">PRO</span>';
+  }
+
+  function renderKeys(list){
+    tableBody.innerHTML = '';
+    list.forEach(item=>{
+      const tr = document.createElement('tr');
+
+      const tdKey = document.createElement('td');
+      tdKey.textContent = item.key;
+      tr.appendChild(tdKey);
+
+      const tdLimit = document.createElement('td');
+      tdLimit.textContent = item.limit === 0 ? '∞' : item.limit;
+      tr.appendChild(tdLimit);
+
+      const tdUsed = document.createElement('td');
+      tdUsed.textContent = item.used;
+      tr.appendChild(tdUsed);
+
+      const tdRem = document.createElement('td');
+      tdRem.textContent = item.limit === 0
+        ? '∞'
+        : (item.remaining != null ? item.remaining : '');
+      tr.appendChild(tdRem);
+
+      const tdPlan = document.createElement('td');
+      tdPlan.innerHTML = detectPlanTag(item.key, item.limit);
+      tr.appendChild(tdPlan);
+
+      const tdNote = document.createElement('td');
+      tdNote.className = 'note';
+      tdNote.textContent = item.note || '';
+      tr.appendChild(tdNote);
+
+      tableBody.appendChild(tr);
+    });
+  }
+
+  createBtn.addEventListener('click', async ()=>{
+    createStatus.textContent = '';
+    errorBox.textContent = '';
+    createBtn.disabled = true;
+
+    try{
+      const limit = Number(limitInput.value || '0') || 0;
+      const prefix = prefixInput.value.trim();
+      const note = noteInput.value.trim();
+
+      const res = await fetch('/api/admin/new-key?secret=' + encodeURIComponent(secret), {
+        method:'POST',
+        headers:{'content-type':'application/json'},
+        body: JSON.stringify({ limit, prefix, note })
+      });
+      const data = await res.json().catch(()=> ({}));
+      if(!res.ok || !data.ok){
+        throw new Error(data.error || ('HTTP ' + res.status));
+      }
+      createStatus.textContent = 'Created: ' + data.key;
+      await loadKeys();
+    }catch(e){
+      errorBox.textContent = String(e.message || e);
+    }finally{
+      createBtn.disabled = false;
+    }
+  });
+
+  if (!secret) {
+    errorBox.textContent = 'Add ?secret=YOUR_ADMIN_SECRET to URL.';
+  } else {
+    loadKeys();
+  }
+})();
+</script>
+</body>
+</html>`);
+});
 
 /* ====================== HEALTH ====================== */
 
@@ -1952,6 +2312,7 @@ https://hi-ai.ai #ai #automation #creativity`.slice(0, maxChars);
 
 const PORT = process.env.PORT || 10000;
 app.listen(PORT, () => console.log(`HI-AI backend on :${PORT}`));
+
 
 
 
