@@ -362,7 +362,7 @@ app.post("/api/upload", upload.single("file"), async (req, res) => {
 
 /* ====================== TRIM 2s / 2.5s ====================== */
 
-app.post("/api/trim25", upload.single("file"), async (req, res) => {
+app.post("/api/trim25", guardPaid, upload.single("file"), async (req, res) => {
   // CORS
   res.setHeader("Access-Control-Allow-Origin", "*");
   try {
@@ -449,7 +449,7 @@ app.post("/api/trim25", upload.single("file"), async (req, res) => {
 /* ====================== ZOOM (duration/fps/factor) ====================== */
 // принимает duration(1–5), fps(15–60), factor(1.0–2.0)
 
-app.post("/api/zoom2s", upload.single("file"), async (req, res) => {
+app.post("/api/zoom2s", guardPaid, upload.single("file"), async (req, res) => {
   try {
     if (!req.file) return res.status(400).json({ ok: false, error: "no_file" });
 
@@ -519,7 +519,7 @@ app.post("/api/zoom2s", upload.single("file"), async (req, res) => {
 
 /* ====================== WATERMARK ====================== */
 
-app.post("/api/watermark-video", upload.single("file"), async (req, res) => {
+app.post("/api/watermark-video", guardPaid, upload.single("file"), async (req, res) => {
   // CORS
   res.setHeader("Access-Control-Allow-Origin", "*");
 
@@ -863,7 +863,7 @@ app.post("/", (req, res) => {
 
 /* ====================== BRAND POST ====================== */
 
-app.post("/api/brand-post", async (req, res) => {
+app.post("/api/brand-post", guardPaid, async (req, res) => {
   try {
     const body = readBody(req.body);
     const idea = (body.idea || body.prompt || "").toString().trim();
@@ -1109,7 +1109,7 @@ https://hi-ai.ai #ai #automation #creativity`.slice(0, maxChars);
 
 /* ====================== IMAGE STUDIO ====================== */
 
-app.post("/api/image-studio", async (req, res) => {
+app.post("/api/image-studio", guardPaid, async (req, res) => {
   try {
     const DEFAULT_AR = "1:1";
     const DEFAULT_STRENGTH = 0.6;
@@ -1435,7 +1435,7 @@ app.post("/api/image-studio", async (req, res) => {
 
 /* ====================== VIDEO STUDIO (FINAL) ====================== */
 
-app.post("/api/video-studio", async (req, res) => {
+app.post("/api/video-studio", guardPaid, async (req, res) => {
   try {
     const body = readBody(req.body);
 
@@ -1540,7 +1540,7 @@ app.post("/api/video-studio", async (req, res) => {
 
 /* ====================== VIDEO REELS ====================== */
 
-app.post("/api/video-reels", async (req, res) => {
+app.post("/api/video-reels", guardPaid, async (req, res) => {
   try {
     const body = readBody(req.body);
 
@@ -1950,6 +1950,7 @@ https://hi-ai.ai #ai #automation #creativity`.slice(0, maxChars);
 
 const PORT = process.env.PORT || 10000;
 app.listen(PORT, () => console.log(`HI-AI backend on :${PORT}`));
+
 
 
 
